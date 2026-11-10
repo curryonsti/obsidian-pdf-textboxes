@@ -1,0 +1,16 @@
+# dependencies
+node_modules
+
+# build output (attached to GitHub releases instead)
+main.js
+*.map
+dist/
+bench-out/
+
+# local
+data.json
+.hotreload
+.DS_Store
+.vscode
+.idea
+*.iml

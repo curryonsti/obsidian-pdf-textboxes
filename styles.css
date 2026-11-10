@@ -1,0 +1,238 @@
+/* PDF Text Boxes */
+
+.ptb-layer {
+	position: absolute;
+	inset: 0;
+	z-index: 20;
+	pointer-events: none;
+}
+
+.ptb-add-mode .page {
+	cursor: text;
+}
+.ptb-add-mode .textLayer {
+	pointer-events: none;
+}
+
+.ptb-box {
+	position: absolute;
+	pointer-events: auto;
+	/* Set by the plugin from the loaded font files; must match the baker. */
+	font-family: var(--ptb-font-family, sans-serif);
+	/* pdf-lib draws without kerning/ligatures; match it so widths agree. */
+	font-kerning: none;
+	font-variant-ligatures: none;
+	white-space: pre;
+	padding: 0;
+	margin: 0;
+	cursor: move;
+	outline: 1px dashed transparent;
+	outline-offset: 2px;
+	border-radius: 1px;
+	user-select: none;
+	min-width: 0.5em;
+	min-height: 1.2em;
+}
+.ptb-box:hover {
+	outline-color: var(--interactive-accent);
+}
+.ptb-box.is-selected,
+.ptb-box:focus-visible {
+	outline: 1px solid var(--interactive-accent);
+}
+.ptb-box.is-editing {
+	cursor: text;
+	user-select: text;
+	outline: 1px solid var(--interactive-accent);
+	background: rgba(255, 255, 255, 0.55);
+}
+.ptb-box.is-dragging {
+	opacity: 0.8;
+}
+.ptb-text {
+	outline: none;
+	white-space: pre;
+	min-width: 0.5em;
+	caret-color: currentColor;
+}
+.ptb-text:empty::before {
+	content: 'Text…';
+	opacity: 0.4;
+}
+
+/* Style panel that slides out of the T button in the PDF toolbar. */
+.ptb-tool {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+.ptb-panel {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	overflow: hidden;
+	white-space: nowrap;
+	max-width: 0;
+	opacity: 0;
+	transform: translateX(16px) scaleX(0.9);
+	transform-origin: right center;
+	pointer-events: none;
+	transition:
+		max-width 240ms cubic-bezier(0.4, 0, 0.2, 1),
+		opacity 160ms ease,
+		transform 240ms cubic-bezier(0.4, 0, 0.2, 1),
+		margin 220ms ease;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+.ptb-tool.is-open .ptb-panel {
+	max-width: 360px;
+	opacity: 1;
+	transform: none;
+	pointer-events: auto;
+	margin-right: 4px;
+}
+.ptb-panel .ptb-btn {
+	padding: var(--size-2-2);
+}
+.ptb-panel:not(.has-box) .ptb-del {
+	display: none;
+}
+.ptb-size {
+	min-width: 2em;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+}
+.ptb-sep {
+	flex: none;
+	width: 1px;
+	height: 16px;
+	margin: 0 4px;
+	background: var(--background-modifier-border);
+}
+.ptb-swatch {
+	flex: none;
+	width: 14px;
+	height: 14px;
+	margin: 0 1px;
+	border-radius: 50%;
+	cursor: pointer;
+	border: 2px solid transparent;
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+	transition: transform 120ms ease;
+}
+.ptb-swatch:hover {
+	transform: scale(1.15);
+}
+.ptb-swatch.is-active {
+	border-color: var(--background-primary);
+	box-shadow: 0 0 0 2px var(--interactive-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+	.ptb-panel {
+		transition: none;
+	}
+}
+
+.ptb-toolbar-toggle.is-active {
+	color: var(--interactive-accent);
+	background-color: var(--background-modifier-active-hover);
+}
+
+/* Symbol palette: drops down below the T button. */
+.ptb-symbols {
+	position: absolute;
+	top: 8px;
+	right: 20px;
+	z-index: 40;
+	width: max-content;
+	padding: 6px 8px 8px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 8px);
+	box-shadow: var(--shadow-l);
+	opacity: 0;
+	visibility: hidden;
+	transform: translateY(-6px) scale(0.98);
+	transform-origin: top right;
+	transition:
+		opacity 160ms ease,
+		transform 200ms cubic-bezier(0.4, 0, 0.2, 1),
+		visibility 0s linear 200ms;
+}
+.ptb-symbols.is-open {
+	opacity: 1;
+	visibility: visible;
+	transform: none;
+	transition:
+		opacity 160ms ease,
+		transform 200ms cubic-bezier(0.4, 0, 0.2, 1),
+		visibility 0s;
+}
+.ptb-symbols-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 2px;
+}
+.ptb-symbols-hint {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+}
+.ptb-symbols-hint.is-warning {
+	color: var(--text-warning);
+}
+.ptb-symbols-close {
+	padding: 2px;
+}
+.ptb-symbols-label {
+	margin: 6px 0 3px;
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+}
+.ptb-symbols-grid {
+	display: grid;
+	grid-template-columns: repeat(13, 26px);
+	gap: 2px;
+}
+.ptb-sym {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 26px;
+	border-radius: var(--radius-s, 4px);
+	font-family: var(--ptb-font-family, sans-serif);
+	font-size: 15px;
+	color: var(--text-normal);
+	cursor: pointer;
+	user-select: none;
+}
+.ptb-sym-base {
+	color: var(--text-faint);
+}
+.ptb-sym:hover {
+	background: var(--background-modifier-hover);
+}
+.ptb-sym:active {
+	background: var(--background-modifier-active-hover);
+}
+.ptb-panel .ptb-btn.is-active {
+	color: var(--interactive-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+	.ptb-symbols,
+	.ptb-symbols.is-open {
+		transition: none;
+	}
+}
+
+/* Background button shows the current fill; boxes with a background stay square
+   so the overlay matches the baked rectangle. */
+.ptb-bg-btn svg {
+	fill: var(--ptb-bg, transparent);
+}
+.ptb-box.has-bg {
+	border-radius: 0;
+}
