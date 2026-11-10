@@ -193,7 +193,7 @@ export class PdfOverlay {
 	private queueRelayout() {
 		if (this.relayoutQueued) return;
 		this.relayoutQueued = true;
-		window.requestAnimationFrame(() => {
+		activeWindow.requestAnimationFrame(() => {
 			this.relayoutQueued = false;
 			if (!this.disposed) this.renderAll();
 		});
@@ -365,7 +365,7 @@ export class PdfOverlay {
 		}
 		if (this.editingId !== id) this.startEditing(id);
 		const text = this.boxEls.get(id)?.querySelector<HTMLElement>('.ptb-text');
-		if (text && !text.contains(document.activeElement) && document.activeElement !== text) this.focusText(id);
+		if (text && !text.contains(text.doc.activeElement)) this.focusText(id);
 		if (text) insertAtCaret(text, sym);
 		if (text) this.commitText(id, text);
 	}
@@ -458,10 +458,10 @@ export class PdfOverlay {
 		text.spellcheck = false;
 		text.focus({ preventScroll: true });
 		if (selectEnd) {
-			const range = document.createRange();
+			const range = text.doc.createRange();
 			range.selectNodeContents(text);
 			range.collapse(false);
-			const sel = window.getSelection();
+			const sel = text.win.getSelection();
 			sel?.removeAllRanges();
 			sel?.addRange(range);
 		}
@@ -495,9 +495,9 @@ export class PdfOverlay {
 		const el = this.boxEls.get(id);
 		// Blur caused by pdf.js re-rendering the page: keep editing.
 		if (!el || !el.isConnected) return;
-		if (el.contains(document.activeElement)) return;
+		if (el.contains(el.doc.activeElement)) return;
 		this.finishEditing();
-		if (this.selectedId === id && !el.contains(document.activeElement)) this.select(null);
+		if (this.selectedId === id && !el.contains(el.doc.activeElement)) this.select(null);
 	}
 
 	private onInput(id: string, text: HTMLElement) {

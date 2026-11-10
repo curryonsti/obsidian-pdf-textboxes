@@ -84,6 +84,15 @@ Characters the main font lacks (e.g. some math symbols) are drawn with the bundl
 DejaVu Sans, both on screen and in the PDF. You can pick another `.ttf`/`.otf`/`.ttc`
 file in the settings.
 
+## Privacy and file access
+
+- **No network access.** The plugin never connects to the internet, has no telemetry and no ads.
+- **Files outside your vault:** it reads one font file from your system's font folder
+  (`/System/Library/Fonts/Helvetica.ttc` on macOS, `C:\Windows\Fonts\arial.ttf` on Windows,
+  or the file you choose in the settings). It only reads that file and never writes outside your vault.
+- **Files inside your vault:** it rewrites PDFs you add text boxes to (see above) and keeps
+  its data in the data folder. It doesn't touch other files.
+
 ## Limitations
 
 - Desktop only.

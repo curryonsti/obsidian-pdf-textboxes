@@ -14,7 +14,7 @@ import { Baker } from './baker';
 import { isObsidianSyncEnabled, ViewerHandle, ViewerHooks } from './viewer-hooks';
 import { COLOR_NAMES, COLORS, OverlayHost, PdfOverlay } from './overlay';
 import { AnnotationDoc, BoxHistory } from './types';
-import { defaultMainFontFile, LoadedFonts, loadFonts, unloadFonts } from './fonts';
+import { attachFonts, defaultMainFontFile, detachFonts, LoadedFonts, loadFonts, unloadFonts } from './fonts';
 import { sha256Hex } from './hash';
 import { confirmDialog } from './ui';
 
@@ -71,7 +71,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		this.settings = Object.assign({}, DEFAULTS, (await this.loadData()) as Partial<Settings> | null);
 		this.style = { fontSize: this.settings.fontSize, color: this.settings.color, bg: null };
 		this.store = new Store(this.app, this.settings.dataFolder);
-		this.fonts = loadFonts(this.settings.mainFontFile);
+		this.fonts = loadFonts(this.settings.mainFontFile, this.windowDocs());
 		this.baker = new Baker(this.app, this.store, () => this.fonts, this.settings.idleSeconds * 1000);
 		this.statusEl = this.addStatusBarItem();
 		this.baker.onStatus = (path, state, info) => this.onBakeStatus(path, state, info);
@@ -91,6 +91,9 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 			}
 		});
 
+		// Popout windows have their own document, so they need their own font faces.
+		this.registerEvent(this.app.workspace.on('window-open', (w) => void this.fonts.then(() => attachFonts(w.doc))));
+		this.registerEvent(this.app.workspace.on('window-close', (w) => detachFonts(w.doc)));
 		this.registerEvent(this.app.vault.on('rename', (f, old) => void this.onRename(f, old)));
 		this.registerEvent(this.app.vault.on('delete', (f) => void this.onDelete(f)));
 		this.registerEvent(this.app.vault.on('modify', (f) => void this.onModify(f)));
@@ -193,9 +196,18 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		return null;
 	}
 
+	/** The main window's document plus those of open popout windows. */
+	private windowDocs(): Document[] {
+		const docs = new Set<Document>([this.app.workspace.containerEl.doc]);
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			docs.add(leaf.view.containerEl.doc);
+		});
+		return [...docs];
+	}
+
 	/** Main font setting changed: reload fonts and restart the baker's worker. */
 	async reloadFonts() {
-		this.fonts = loadFonts(this.settings.mainFontFile);
+		this.fonts = loadFonts(this.settings.mainFontFile, this.windowDocs());
 		await this.fonts;
 		await this.baker.resetWorker();
 	}

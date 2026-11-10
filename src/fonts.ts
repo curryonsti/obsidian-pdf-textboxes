@@ -4,7 +4,6 @@ import * as path from 'path';
 // Bundled into main.js by esbuild (binary loader), so a release needs no extra files.
 import dejavuBytes from '../node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf';
 import { extractFace } from './ttc';
-import { LINE_HEIGHT } from './types';
 
 export const MAIN_FAMILY = 'PTB Main';
 export const FALLBACK_FAMILY = 'PTB DejaVu Sans';
@@ -26,55 +25,85 @@ export function defaultMainFontFile(): string {
 	return '';
 }
 
+/** Font bytes currently in use, so windows opened later get the same faces. */
+let current: { faces: [string, ArrayBuffer][]; stack: string } | null = null;
+/** Faces registered per window document (main window + popouts). */
+const attached = new Map<Document, FontFace[]>();
+
 /**
  * Loads the fonts used for text boxes and registers them with the browser
  * (FontFace), so the on-screen boxes and the baked PDF use the *same files*:
  *   main font (from `mainFontFile`)  →  per-character fallback to DejaVu Sans.
- * Also sets the CSS variable --ptb-font-family on <body>.
+ * `docs` are the window documents to register them in (the first one is used
+ * to measure the baseline). Sets the CSS variable --ptb-font-family on each body.
  */
-export async function loadFonts(mainFontFile: string): Promise<LoadedFonts> {
+export async function loadFonts(mainFontFile: string, docs: Document[]): Promise<LoadedFonts> {
 	const fallback = copy(dejavuBytes);
-	await registerFace(FALLBACK_FAMILY, fallback);
-
 	let primary: ArrayBuffer | null = null;
 	let description = 'DejaVu Sans (bundled)';
-	if (mainFontFile.trim()) {
+	const file = mainFontFile.trim();
+	if (file) {
 		try {
-			const raw = new Uint8Array(await fs.promises.readFile(mainFontFile.trim()));
-			const preferred = path.basename(mainFontFile.trim()).replace(/\.(ttc|ttf|otf)$/i, '');
+			const raw = new Uint8Array(await fs.promises.readFile(file));
+			const preferred = path.basename(file).replace(/\.(ttc|ttf|otf)$/i, '');
 			primary = copy(extractFace(raw, preferred));
-			await registerFace(MAIN_FAMILY, primary);
-			description = `${path.basename(mainFontFile.trim())}, with DejaVu Sans for missing characters`;
+			description = `${path.basename(file)}, with DejaVu Sans for missing characters`;
 		} catch (e) {
 			console.warn('[pdf-textboxes] main font could not be loaded, using DejaVu Sans only', e);
 			primary = null;
-			description = `DejaVu Sans (bundled) – could not load ${mainFontFile}`;
+			description = `DejaVu Sans (bundled) – could not load ${file}`;
 		}
 	}
+	const faces: [string, ArrayBuffer][] = [[FALLBACK_FAMILY, fallback]];
+	if (primary) faces.push([MAIN_FAMILY, primary]);
 	const stack = primary ? `"${MAIN_FAMILY}", "${FALLBACK_FAMILY}", sans-serif` : `"${FALLBACK_FAMILY}", sans-serif`;
-	document.body.style.setProperty('--ptb-font-family', stack);
-	return { primary, fallback, baselineEm: measureBaselineEm(), description };
+	current = { faces, stack };
+
+	const targets = new Set([...attached.keys(), ...docs]);
+	try {
+		await Promise.all([...targets].map((d) => attachFonts(d)));
+	} catch (e) {
+		// A broken main font file: fall back to DejaVu Sans only.
+		if (!primary) throw e;
+		console.warn('[pdf-textboxes] main font could not be used, using DejaVu Sans only', e);
+		current = { faces: [[FALLBACK_FAMILY, fallback]], stack: `"${FALLBACK_FAMILY}", sans-serif` };
+		primary = null;
+		description = `DejaVu Sans (bundled) – could not use ${file}`;
+		await Promise.all([...targets].map((d) => attachFonts(d)));
+	}
+	return { primary, fallback, baselineEm: docs[0] ? measureBaselineEm(docs[0]) : undefined, description };
+}
+
+/** Registers the current fonts in a window's document (e.g. a newly opened popout). */
+export async function attachFonts(doc: Document) {
+	if (!current) return;
+	const win = doc.defaultView;
+	if (!win) return;
+	detachFonts(doc);
+	const list: FontFace[] = [];
+	attached.set(doc, list);
+	for (const [family, bytes] of current.faces) {
+		// Each window has its own FontFace constructor and FontFaceSet.
+		const face = new win.FontFace(family, bytes.slice(0));
+		await face.load();
+		if (attached.get(doc) !== list) return; // detached or replaced meanwhile
+		doc.fonts.add(face);
+		list.push(face);
+	}
+	doc.body.style.setProperty('--ptb-font-family', current.stack);
+}
+
+export function detachFonts(doc: Document) {
+	const list = attached.get(doc);
+	if (!list) return;
+	attached.delete(doc);
+	for (const face of list) doc.fonts.delete(face);
+	doc.body?.style.removeProperty('--ptb-font-family');
 }
 
 export function unloadFonts() {
-	document.body.style.removeProperty('--ptb-font-family');
-	for (const face of [...registered]) document.fonts.delete(face);
-	registered.clear();
-}
-
-const registered = new Set<FontFace>();
-
-async function registerFace(family: string, bytes: ArrayBuffer) {
-	for (const f of [...registered]) {
-		if (f.family.replace(/"/g, '') === family) {
-			document.fonts.delete(f);
-			registered.delete(f);
-		}
-	}
-	const face = new FontFace(family, bytes.slice(0));
-	await face.load();
-	document.fonts.add(face);
-	registered.add(face);
+	for (const doc of [...attached.keys()]) detachFonts(doc);
+	current = null;
 }
 
 function copy(bytes: Uint8Array): ArrayBuffer {
@@ -84,16 +113,15 @@ function copy(bytes: Uint8Array): ArrayBuffer {
 /**
  * Where the browser puts the baseline inside a text box line, in em. The
  * baker uses this so baked text sits exactly where the overlay showed it.
+ * Measured at 1000px (see .ptb-measure in styles.css) so whole-pixel
+ * rounding does not matter (0.001 em).
  */
-function measureBaselineEm(): number | undefined {
-	const box = document.body.createDiv('ptb-box');
+function measureBaselineEm(doc: Document): number | undefined {
+	const box = doc.body.createDiv('ptb-box ptb-measure');
 	try {
-		// Large size so whole-pixel rounding does not matter (0.001 em).
-		box.setCssStyles({ position: 'fixed', left: '-100000px', top: '0', fontSize: '1000px', lineHeight: String(LINE_HEIGHT), visibility: 'hidden' });
 		const text = box.createDiv('ptb-text');
 		text.setText('Hg');
-		const probe = text.createSpan();
-		probe.setCssStyles({ display: 'inline-block', width: '0', height: '0', verticalAlign: 'baseline' });
+		const probe = text.createSpan('ptb-measure-probe');
 		const em = (probe.getBoundingClientRect().top - box.getBoundingClientRect().top) / 1000;
 		return em > 0.5 && em < 1.2 ? em : undefined;
 	} finally {
