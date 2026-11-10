@@ -61,7 +61,9 @@ export class Baker {
 	/** True if the current state of `file` on disk is exactly what we last wrote. */
 	isOwnWrite(file: TFile): boolean {
 		const w = this.ownWrites.get(file.path);
-		return !!w && w.size === file.stat.size && Math.abs(w.mtime - file.stat.mtime) <= 2;
+		if (!w || w.size !== file.stat.size) return false;
+		// mtime is unknown while our write is still in progress.
+		return w.mtime < 0 || Math.abs(w.mtime - file.stat.mtime) <= 2;
 	}
 
 	schedule(path: string, delay = this.idleMs) {
@@ -146,14 +148,23 @@ export class Baker {
 				this.onStatus(doc.pdfPath, 'done', { path: doc.pdfPath, ms: res.ms, totalMs: performance.now() - t0 });
 				return;
 			}
-			const stat = await this.store.atomicWrite(doc.pdfPath, new Uint8Array(res.bytes));
-			this.ownWrites.set(doc.pdfPath, { size: stat.size, mtime: Math.round(stat.mtimeMs) });
+			const bytes = new Uint8Array(res.bytes);
+			// Register before writing: Obsidian fires `modify` during the write.
+			this.ownWrites.set(doc.pdfPath, { size: bytes.byteLength, mtime: -1 });
+			let stat: { size: number; mtime: number };
+			try {
+				stat = await this.store.writeVaultPdf(target, bytes);
+			} catch (e) {
+				this.ownWrites.delete(doc.pdfPath);
+				throw e;
+			}
+			this.ownWrites.set(doc.pdfPath, { size: stat.size, mtime: Math.round(stat.mtime) });
 
 			doc.bakedRevision = rev;
 			doc.lastBake = {
 				sha256: res.sha256,
 				size: stat.size,
-				mtime: Math.round(stat.mtimeMs),
+				mtime: Math.round(stat.mtime),
 				at: Date.now(),
 				ms: Math.round(res.ms),
 			};

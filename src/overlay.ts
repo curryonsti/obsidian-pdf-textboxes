@@ -193,7 +193,7 @@ export class PdfOverlay {
 	private queueRelayout() {
 		if (this.relayoutQueued) return;
 		this.relayoutQueued = true;
-		activeWindow.requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.relayoutQueued = false;
 			if (!this.disposed) this.renderAll();
 		});

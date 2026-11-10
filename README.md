@@ -57,7 +57,9 @@ file as the new original*, *Remove all text boxes and restore the original PDF*,
   in your vault is **rebuilt** from that original plus your notes. The notes become normal
   page text (not PDF annotations), which is what makes them readable by every tool.
 - While you work, Obsidian shows the original with your notes as an editable layer on top.
-- Writes are atomic (temp file + rename), so a crash never leaves a half-written PDF.
+- Your notes and the stored original are always written as a complete new copy first, so
+  a crash can't lose them. If Obsidian crashes while a PDF is being rebuilt, it is simply
+  rebuilt again the next time you open it.
 - Renaming or moving a PDF moves its notes along. Deleting a PDF moves its notes to
   `<data folder>/.trash/` instead of deleting them.
 - *Remove all text boxes and restore the original PDF* puts the untouched original back.
@@ -81,17 +83,17 @@ allowed; you get a warning and the form fields are kept.
 
 On macOS the notes use Helvetica, on Windows Arial, on Linux the bundled DejaVu Sans.
 Characters the main font lacks (e.g. some math symbols) are drawn with the bundled
-DejaVu Sans, both on screen and in the PDF. You can pick another `.ttf`/`.otf`/`.ttc`
-file in the settings.
+DejaVu Sans, both on screen and in the PDF. You can pick any other installed font in
+the settings.
 
 ## Privacy and file access
 
 - **No network access.** The plugin never connects to the internet, has no telemetry and no ads.
-- **Files outside your vault:** it reads one font file from your system's font folder
-  (`/System/Library/Fonts/Helvetica.ttc` on macOS, `C:\Windows\Fonts\arial.ttf` on Windows,
-  or the file you choose in the settings). It only reads that file and never writes outside your vault.
-- **Files inside your vault:** it rewrites PDFs you add text boxes to (see above) and keeps
-  its data in the data folder. It doesn't touch other files.
+- **No access outside your vault.** All files are read and written through Obsidian's
+  own file API. The font (Helvetica/Arial or the one you choose) is read through the
+  browser's font access, the same list of installed fonts any app can use.
+- **Inside your vault** it rewrites only the PDFs you add text boxes to (see above) and
+  keeps its data in the data folder.
 
 ## Limitations
 

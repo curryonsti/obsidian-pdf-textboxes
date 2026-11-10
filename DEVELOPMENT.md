@@ -39,7 +39,7 @@ Always test on copies of PDFs.
 | Viewer internals | `src/viewer-hooks.ts` | **The only file that touches private Obsidian/pdf.js objects.** Fix this first after an Obsidian update. |
 | Overlay | `src/overlay.ts` | Text box UI per page, style panel, symbol palette, undo/redo; re-attaches on `pagerendered`. |
 | Storage | `src/store.ts` | `<data folder>/<pdf path>/annotations.json` + `original.pdf`; atomic writes; rename/delete. |
-| Scheduler | `src/baker.ts` | When to rebuild; runs the worker; atomic write of the visible PDF. |
+| Scheduler | `src/baker.ts` | When to rebuild; runs the worker; writes the visible PDF with `vault.modifyBinary` (re-baked on open if a write was interrupted). |
 | Bake | `src/bake.ts`, `src/bake.worker.ts` | original + boxes → new PDF (pdf-lib), PDF inspection (signed/encrypted/forms). |
 | Fonts | `src/fonts.ts`, `src/ttc.ts` | Loads the main font file + bundled DejaVu Sans into the browser (FontFace) and the baker, so both use identical glyphs. |
 

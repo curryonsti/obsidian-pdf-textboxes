@@ -1,6 +1,4 @@
 import { Platform } from 'obsidian';
-import * as fs from 'fs';
-import * as path from 'path';
 // Bundled into main.js by esbuild (binary loader), so a release needs no extra files.
 import dejavuBytes from '../node_modules/dejavu-fonts-ttf/ttf/DejaVuSans.ttf';
 import { extractFace } from './ttc';
@@ -12,17 +10,60 @@ export interface LoadedFonts {
 	/** Main font as a standalone TTF, or null to use DejaVu Sans only. */
 	primary: ArrayBuffer | null;
 	fallback: ArrayBuffer;
-	/** Browser-measured baseline offset (em) for the font stack in use. */
-	baselineEm?: number;
 	/** What is actually used, for the settings tab. */
 	description: string;
 }
 
-/** A Helvetica-like system font that exists by default on each desktop OS. */
-export function defaultMainFontFile(): string {
-	if (Platform.isMacOS) return '/System/Library/Fonts/Helvetica.ttc';
-	if (Platform.isWin) return 'C:\\Windows\\Fonts\\arial.ttf';
+/** PostScript name of a Helvetica-like font that every install of the OS has. Empty = bundled DejaVu Sans. */
+export function defaultMainFont(): string {
+	if (Platform.isMacOS) return 'Helvetica';
+	if (Platform.isWin) return 'ArialMT';
 	return '';
+}
+
+/** Settings of version 1.0.x stored a font file path; map it to a font name. */
+export function fontFromLegacyFile(file: string): string {
+	const base = file.trim().split(/[\\/]/).pop()?.replace(/\.(ttc|ttf|otf)$/i, '') ?? '';
+	if (!base) return '';
+	if (/^arial$/i.test(base)) return 'ArialMT';
+	return base;
+}
+
+// Local Font Access API (Chromium). Reads installed fonts without file system access.
+interface LocalFontData {
+	postscriptName: string;
+	fullName: string;
+	family: string;
+	style: string;
+	blob(): Promise<Blob>;
+}
+type QueryLocalFonts = (opts?: { postscriptNames?: string[] }) => Promise<LocalFontData[]>;
+
+function queryLocalFonts(): QueryLocalFonts | null {
+	const q = (activeWindow as unknown as { queryLocalFonts?: QueryLocalFonts }).queryLocalFonts;
+	return q ? q.bind(activeWindow) : null;
+}
+
+/** Installed regular-weight fonts, for the settings dropdown. */
+export async function listInstalledFonts(): Promise<{ name: string; label: string }[]> {
+	const q = queryLocalFonts();
+	if (!q) return [];
+	const fonts = await q();
+	return fonts
+		.filter((f) => /^(regular|roman|book|normal)$/i.test(f.style))
+		.map((f) => ({ name: f.postscriptName, label: f.fullName }))
+		.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** The installed font with this PostScript name, as a standalone TTF/OTF. */
+async function readInstalledFont(name: string): Promise<Uint8Array> {
+	const q = queryLocalFonts();
+	if (!q) throw new Error('this Obsidian version cannot read installed fonts');
+	const [font] = await q({ postscriptNames: [name] });
+	if (!font) throw new Error(`font “${name}” is not installed`);
+	const raw = new Uint8Array(await (await font.blob()).arrayBuffer());
+	// Some systems hand out the whole collection (.ttc): pick the face.
+	return extractFace(raw, name);
 }
 
 /** Font bytes currently in use, so windows opened later get the same faces. */
@@ -33,25 +74,24 @@ const attached = new Map<Document, FontFace[]>();
 /**
  * Loads the fonts used for text boxes and registers them with the browser
  * (FontFace), so the on-screen boxes and the baked PDF use the *same files*:
- *   main font (from `mainFontFile`)  →  per-character fallback to DejaVu Sans.
- * `docs` are the window documents to register them in (the first one is used
+ *   main font (installed font `mainFont`)  →  per-character fallback to DejaVu Sans.
+ * `mainFont` is the PostScript name of an installed font (read through the
+ * browser's Local Font Access API). `docs` are the window documents to register them in (the first one is used
  * to measure the baseline). Sets the CSS variable --ptb-font-family on each body.
  */
-export async function loadFonts(mainFontFile: string, docs: Document[]): Promise<LoadedFonts> {
+export async function loadFonts(mainFont: string, docs: Document[]): Promise<LoadedFonts> {
 	const fallback = copy(dejavuBytes);
 	let primary: ArrayBuffer | null = null;
 	let description = 'DejaVu Sans (bundled)';
-	const file = mainFontFile.trim();
+	const file = mainFont.trim();
 	if (file) {
 		try {
-			const raw = new Uint8Array(await fs.promises.readFile(file));
-			const preferred = path.basename(file).replace(/\.(ttc|ttf|otf)$/i, '');
-			primary = copy(extractFace(raw, preferred));
-			description = `${path.basename(file)}, with DejaVu Sans for missing characters`;
+			primary = copy(await readInstalledFont(file));
+			description = `${file}, with DejaVu Sans for missing characters`;
 		} catch (e) {
 			console.warn('[pdf-textboxes] main font could not be loaded, using DejaVu Sans only', e);
 			primary = null;
-			description = `DejaVu Sans (bundled) – could not load ${file}`;
+			description = `DejaVu Sans (bundled) – could not load ${file}: ${(e as Error).message}`;
 		}
 	}
 	const faces: [string, ArrayBuffer][] = [[FALLBACK_FAMILY, fallback]];
@@ -71,7 +111,7 @@ export async function loadFonts(mainFontFile: string, docs: Document[]): Promise
 		description = `DejaVu Sans (bundled) – could not use ${file}`;
 		await Promise.all([...targets].map((d) => attachFonts(d)));
 	}
-	return { primary, fallback, baselineEm: docs[0] ? measureBaselineEm(docs[0]) : undefined, description };
+	return { primary, fallback, description };
 }
 
 /** Registers the current fonts in a window's document (e.g. a newly opened popout). */
@@ -114,9 +154,10 @@ function copy(bytes: Uint8Array): ArrayBuffer {
  * Where the browser puts the baseline inside a text box line, in em. The
  * baker uses this so baked text sits exactly where the overlay showed it.
  * Measured at 1000px (see .ptb-measure in styles.css) so whole-pixel
- * rounding does not matter (0.001 em).
+ * rounding does not matter (0.001 em). Call it when the plugin's styles are
+ * loaded (not during onload) and after `loadFonts`.
  */
-function measureBaselineEm(doc: Document): number | undefined {
+export function measureBaselineEm(doc: Document): number | undefined {
 	const box = doc.body.createDiv('ptb-box ptb-measure');
 	try {
 		const text = box.createDiv('ptb-text');

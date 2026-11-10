@@ -9,6 +9,10 @@ on:
 
 permissions:
   contents: write
+  # Build provenance attestations: lets anyone verify the release files were
+  # built from this repository (`gh attestation verify main.js -R <repo>`).
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -28,6 +32,14 @@ jobs:
             echo "Tag ${GITHUB_REF_NAME} does not match manifest version $version"; exit 1
           fi
       - run: npm run package
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+            dist/*.zip
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

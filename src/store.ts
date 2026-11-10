@@ -1,6 +1,4 @@
-import { App, FileSystemAdapter, normalizePath } from 'obsidian';
-import * as fs from 'fs';
-import * as nodePath from 'path';
+import { App, DataAdapter, normalizePath, TFile } from 'obsidian';
 import { AnnotationDoc } from './types';
 import { sha256Hex } from './hash';
 
@@ -13,9 +11,10 @@ const ORIGINAL_FILE = 'original.pdf';
  *   annotations.json  – the text boxes (written on every change)
  *   original.pdf      – pristine copy of the PDF, never modified
  *
- * Dot-folders are invisible to Obsidian's vault API, so everything goes
- * through `app.vault.adapter`. Writes that must never be half-done
- * (JSON, baked PDF) use write-to-temp + rename on the real filesystem.
+ * Dot-folders are invisible to Obsidian's vault API, so the data folder goes
+ * through `app.vault.adapter`. Data files are replaced via a complete
+ * `<name>.ptb-new` copy, so a crash can always be recovered from (see
+ * `replaceFile` / `recover`). The visible PDF is written with the Vault API.
  */
 export class Store {
 	private cache = new Map<string, AnnotationDoc | null>();
@@ -50,10 +49,8 @@ export class Store {
 		if (await this.adapter.exists(target)) return `“${target}” already exists. Choose a new folder name.`;
 		await Promise.all([...this.writeChainsList()].map((p) => p.catch(() => undefined)));
 		if (await this.adapter.exists(this.root)) {
-			const from = this.adapter.getFullPath(this.root);
-			const to = this.adapter.getFullPath(target);
-			await fs.promises.mkdir(nodePath.dirname(to), { recursive: true });
-			await fs.promises.rename(from, to);
+			if (parentOf(target)) await this.adapter.mkdir(parentOf(target));
+			await this.adapter.rename(this.root, target);
 		}
 		this.root = target;
 		return null;
@@ -64,8 +61,8 @@ export class Store {
 		return this.pendingWrites;
 	}
 
-	get adapter(): FileSystemAdapter {
-		return this.app.vault.adapter as FileSystemAdapter;
+	get adapter(): DataAdapter {
+		return this.app.vault.adapter;
 	}
 
 	dataDir(pdfPath: string) {
@@ -87,6 +84,7 @@ export class Store {
 		if (this.cache.has(pdfPath)) return this.cache.get(pdfPath)!;
 		let doc: AnnotationDoc | null = null;
 		const p = this.docPath(pdfPath);
+		await this.recover(p, true);
 		if (await this.adapter.exists(p)) {
 			try {
 				doc = JSON.parse(await this.adapter.read(p)) as AnnotationDoc;
@@ -111,9 +109,9 @@ export class Store {
 	async init(pdfPath: string): Promise<AnnotationDoc> {
 		const existing = await this.load(pdfPath);
 		if (existing && (await this.hasOriginal(pdfPath))) return existing;
-		const bytes = new Uint8Array(await this.adapter.readBinary(pdfPath));
+		const bytes = new Uint8Array(await this.readVaultFile(pdfPath));
 		await this.mkdirp(this.dataDir(pdfPath));
-		await this.atomicWrite(this.originalPath(pdfPath), bytes);
+		await this.replaceFile(this.originalPath(pdfPath), bytes);
 		const doc: AnnotationDoc = existing ?? {
 			version: 1,
 			pdfPath,
@@ -145,7 +143,7 @@ export class Store {
 				// path the doc has now (it may have been renamed while queued).
 				const json = JSON.stringify(doc, null, 1);
 				await this.mkdirp(this.dataDir(doc.pdfPath));
-				await this.atomicWrite(this.docPath(doc.pdfPath), json);
+				await this.replaceFile(this.docPath(doc.pdfPath), json);
 			});
 		this.queuedWrites.set(doc, next);
 		this.writeChains.set(doc, next);
@@ -155,6 +153,7 @@ export class Store {
 	}
 
 	async readOriginal(pdfPath: string): Promise<ArrayBuffer> {
+		await this.recover(this.originalPath(pdfPath), false);
 		return this.adapter.readBinary(this.originalPath(pdfPath));
 	}
 
@@ -164,9 +163,9 @@ export class Store {
 
 	/** Replace original.pdf with the current visible file (after an outside edit). */
 	async adoptCurrentAsOriginal(pdfPath: string) {
-		const bytes = new Uint8Array(await this.adapter.readBinary(pdfPath));
+		const bytes = new Uint8Array(await this.readVaultFile(pdfPath));
 		const doc = await this.load(pdfPath);
-		await this.atomicWrite(this.originalPath(pdfPath), bytes);
+		await this.replaceFile(this.originalPath(pdfPath), bytes);
 		if (doc) {
 			doc.originalSha256 = await sha256Hex(bytes);
 			doc.lastBake = undefined;
@@ -217,7 +216,7 @@ export class Store {
 					const doc = JSON.parse(await this.adapter.read(docFile)) as AnnotationDoc;
 					if (doc.pdfPath !== vaultPath) {
 						doc.pdfPath = vaultPath;
-						await this.atomicWrite(docFile, JSON.stringify(doc, null, 1));
+						await this.replaceFile(docFile, JSON.stringify(doc, null, 1));
 					}
 				} catch {
 					/* leave it */
@@ -234,74 +233,127 @@ export class Store {
 
 	/** Move a file or folder, merging into an existing target folder. */
 	private async movePath(from: string, to: string) {
-		const fromFull = this.adapter.getFullPath(from);
-		const toFull = this.adapter.getFullPath(to);
-		await fs.promises.mkdir(nodePath.dirname(toFull), { recursive: true });
-		if (!fs.existsSync(toFull)) {
-			await fs.promises.rename(fromFull, toFull);
+		if (parentOf(to)) await this.adapter.mkdir(parentOf(to));
+		if (!(await this.adapter.exists(to))) {
+			await this.adapter.rename(from, to);
 			return;
 		}
-		const st = await fs.promises.stat(fromFull);
-		if (!st.isDirectory()) {
+		const st = await this.adapter.stat(from);
+		if (st?.type !== 'folder') {
 			// Never silently overwrite stored data: keep the old one aside.
-			await fs.promises.rename(toFull, `${toFull}.replaced-${Date.now()}`);
-			await fs.promises.rename(fromFull, toFull);
+			await this.adapter.rename(to, `${to}.replaced-${Date.now()}`);
+			await this.adapter.rename(from, to);
 			return;
 		}
-		for (const name of await fs.promises.readdir(fromFull)) {
-			await this.movePath(`${from}/${name}`, `${to}/${name}`);
+		const list = await this.adapter.list(from);
+		for (const child of [...list.files, ...list.folders]) {
+			await this.movePath(child, `${to}/${child.slice(from.length + 1)}`);
 		}
-		await fs.promises.rmdir(fromFull).catch(() => undefined);
+		await this.adapter.rmdir(from, false).catch(() => undefined);
 	}
 
 	private async removeEmptyParents(path: string) {
-		let dir = nodePath.posix.dirname(path);
+		let dir = parentOf(path);
 		while (dir.startsWith(this.root + '/') && dir !== this.trash) {
-			const full = this.adapter.getFullPath(dir);
 			try {
-				const entries = (await fs.promises.readdir(full)).filter((n) => n !== '.DS_Store');
-				if (entries.length) break;
-				await fs.promises.rm(full, { recursive: true });
+				const list = await this.adapter.list(dir);
+				const files = list.files.filter((f) => !f.endsWith('/.DS_Store'));
+				if (files.length || list.folders.length) break;
+				await this.adapter.rmdir(dir, true);
 			} catch {
 				break;
 			}
-			dir = nodePath.posix.dirname(dir);
+			dir = parentOf(dir);
 		}
 	}
 
 	// ---------- low level ----------
 
 	async mkdirp(dir: string) {
-		await fs.promises.mkdir(this.adapter.getFullPath(dir), { recursive: true });
+		await this.adapter.mkdir(dir);
+	}
+
+	/** Reads a file in the vault (the visible PDF), through the Vault API when it is indexed. */
+	async readVaultFile(path: string): Promise<ArrayBuffer> {
+		const file = this.app.vault.getFileByPath(path);
+		return file ? this.app.vault.readBinary(file) : this.adapter.readBinary(path);
 	}
 
 	/**
-	 * Write to a hidden temp file in the same folder, fsync, then rename over the
-	 * target. rename() is atomic on APFS, so readers (and a crash) only ever see
-	 * the old or the new file, never a half-written one.
-	 * Returns the stat of the written file.
+	 * Replaces a file in the data folder so that a crash at any moment leaves a
+	 * complete copy behind: the new content is first written in full to
+	 * `<path>.ptb-new`, then the old file is removed and the new one renamed
+	 * into place. `recover()` finishes an interrupted replace on the next read.
 	 */
-	async atomicWrite(vaultPath: string, data: Uint8Array | string): Promise<fs.Stats> {
-		const full = this.adapter.getFullPath(vaultPath);
-		const tmp = nodePath.join(
-			nodePath.dirname(full),
-			`.${nodePath.basename(full)}.ptb-tmp-${process.pid}-${Date.now()}`,
-		);
-		const fh = await fs.promises.open(tmp, 'w');
+	async replaceFile(path: string, data: Uint8Array | string) {
+		const tmp = `${path}${NEW_SUFFIX}`;
+		this.replacing.add(path);
 		try {
-			await fh.writeFile(data);
-			await fh.sync();
+			if (typeof data === 'string') await this.adapter.write(tmp, data);
+			else await this.adapter.writeBinary(tmp, toArrayBuffer(data));
+			if (await this.adapter.exists(path)) await this.adapter.remove(path);
+			await this.adapter.rename(tmp, path);
 		} finally {
-			await fh.close();
+			this.replacing.delete(path);
 		}
-		try {
-			await fs.promises.rename(tmp, full);
-		} catch (e) {
-			await fs.promises.rm(tmp, { force: true });
-			throw e;
-		}
-		return fs.promises.stat(full);
 	}
+	private replacing = new Set<string>();
+
+	/**
+	 * Finishes or discards an interrupted `replaceFile`:
+	 *  - only `<path>.ptb-new` exists: it was complete (the old file is only
+	 *    removed after it was written), so it becomes the file;
+	 *  - both exist: the crash happened while writing the new copy, or just
+	 *    before removing the old one. For JSON the newer valid one wins; a
+	 *    binary file keeps the old (known complete) version.
+	 */
+	private async recover(path: string, isJson: boolean) {
+		const tmp = `${path}${NEW_SUFFIX}`;
+		if (this.replacing.has(path) || !(await this.adapter.exists(tmp))) return;
+		if (!(await this.adapter.exists(path))) {
+			await this.adapter.rename(tmp, path);
+			return;
+		}
+		if (isJson) {
+			const parse = async (p: string) => {
+				try {
+					return JSON.parse(await this.adapter.read(p)) as AnnotationDoc;
+				} catch {
+					return null;
+				}
+			};
+			const [cur, next] = [await parse(path), await parse(tmp)];
+			if (next && (!cur || next.revision >= cur.revision)) {
+				await this.adapter.remove(path);
+				await this.adapter.rename(tmp, path);
+				return;
+			}
+		}
+		await this.adapter.remove(tmp);
+	}
+
+	/**
+	 * Writes the visible PDF through the Vault API. Not atomic, but safe: the
+	 * doc's `bakedRevision` is only updated afterwards, so after a crash the
+	 * PDF is rebuilt the next time it is opened.
+	 */
+	async writeVaultPdf(file: TFile, data: Uint8Array) {
+		await this.app.vault.modifyBinary(file, toArrayBuffer(data));
+		return { size: file.stat.size, mtime: file.stat.mtime };
+	}
+}
+
+const NEW_SUFFIX = '.ptb-new';
+
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+	return data.byteOffset === 0 && data.byteLength === data.buffer.byteLength
+		? (data.buffer as ArrayBuffer)
+		: (data.slice().buffer);
+}
+
+function parentOf(path: string) {
+	const i = path.lastIndexOf('/');
+	return i > 0 ? path.slice(0, i) : '';
 }
 
 function normalizeRoot(root: string) {

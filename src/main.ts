@@ -14,7 +14,7 @@ import { Baker } from './baker';
 import { isObsidianSyncEnabled, ViewerHandle, ViewerHooks } from './viewer-hooks';
 import { COLOR_NAMES, COLORS, OverlayHost, PdfOverlay } from './overlay';
 import { AnnotationDoc, BoxHistory } from './types';
-import { attachFonts, defaultMainFontFile, detachFonts, LoadedFonts, loadFonts, unloadFonts } from './fonts';
+import { attachFonts, defaultMainFont, measureBaselineEm, detachFonts, fontFromLegacyFile, listInstalledFonts, LoadedFonts, loadFonts, unloadFonts } from './fonts';
 import { sha256Hex } from './hash';
 import { confirmDialog } from './ui';
 
@@ -25,8 +25,8 @@ interface Settings {
 	showBakeNotices: boolean;
 	/** Last zoom per PDF path, as a pdf.js open-param ("page-width", "130"). */
 	zoomByPath: Record<string, string>;
-	/** Font file for the text (TTF/OTF/TTC). Empty = bundled DejaVu Sans only. */
-	mainFontFile: string;
+	/** PostScript name of the installed font for the text. Empty = bundled DejaVu Sans only. */
+	mainFont: string;
 	/** Vault folder for originals + JSON. Hidden by default; Obsidian Sync users need a visible one. */
 	dataFolder: string;
 	/** The Obsidian Sync warning was shown once. */
@@ -39,7 +39,7 @@ const DEFAULTS: Settings = {
 	color: '#000000',
 	showBakeNotices: false,
 	zoomByPath: {},
-	mainFontFile: defaultMainFontFile(),
+	mainFont: defaultMainFont(),
 	dataFolder: DEFAULT_ROOT,
 	syncWarned: false,
 };
@@ -68,11 +68,22 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 	}
 
 	async onload() {
-		this.settings = Object.assign({}, DEFAULTS, (await this.loadData()) as Partial<Settings> | null);
+		const saved = (await this.loadData()) as (Partial<Settings> & { mainFontFile?: string }) | null;
+		this.settings = Object.assign({}, DEFAULTS, saved);
+		// 1.0.x stored a font file path.
+		if (saved && saved.mainFont === undefined && typeof saved.mainFontFile === 'string') {
+			this.settings.mainFont = fontFromLegacyFile(saved.mainFontFile);
+		}
+		delete (this.settings as { mainFontFile?: string }).mainFontFile;
 		this.style = { fontSize: this.settings.fontSize, color: this.settings.color, bg: null };
 		this.store = new Store(this.app, this.settings.dataFolder);
-		this.fonts = loadFonts(this.settings.mainFontFile, this.windowDocs());
-		this.baker = new Baker(this.app, this.store, () => this.fonts, this.settings.idleSeconds * 1000);
+		this.fonts = loadFonts(this.settings.mainFont, this.windowDocs());
+		// The baseline is measured when the worker starts (first bake), when styles.css is surely loaded.
+		const bakeFonts = async () => {
+			const f = await this.fonts;
+			return { ...f, baselineEm: measureBaselineEm(this.app.workspace.containerEl.doc) };
+		};
+		this.baker = new Baker(this.app, this.store, bakeFonts, this.settings.idleSeconds * 1000);
 		this.statusEl = this.addStatusBarItem();
 		this.baker.onStatus = (path, state, info) => this.onBakeStatus(path, state, info);
 
@@ -207,7 +218,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 
 	/** Main font setting changed: reload fonts and restart the baker's worker. */
 	async reloadFonts() {
-		this.fonts = loadFonts(this.settings.mainFontFile, this.windowDocs());
+		this.fonts = loadFonts(this.settings.mainFont, this.windowDocs());
 		await this.fonts;
 		await this.baker.resetWorker();
 	}
@@ -238,7 +249,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 	private async checkCanAnnotate(file: TFile) {
 		const doc = await this.store.load(file.path);
 		if (doc && (await this.store.hasOriginal(file.path))) return;
-		const info = await this.baker.inspect(await this.app.vault.adapter.readBinary(file.path));
+		const info = await this.baker.inspect(await this.app.vault.readBinary(file));
 		const no = (why: string) => {
 			throw new UserFacingError(`Can't add text boxes to “${file.name}”: ${why} The file was not changed.`);
 		};
@@ -417,7 +428,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		if (!doc || !this.managed.has(file.path)) return;
 		const lb = doc.lastBake;
 		if (lb && lb.size === file.stat.size && Math.abs(lb.mtime - file.stat.mtime) <= 2) return;
-		const bytes = new Uint8Array(await this.app.vault.adapter.readBinary(file.path));
+		const bytes = new Uint8Array(await this.app.vault.readBinary(file));
 		const sha = await sha256Hex(bytes);
 		if (sha === lb?.sha256 || sha === doc.originalSha256) return;
 		new Notice(
@@ -457,7 +468,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		if (!ok) return;
 		this.baker.cancel(file.path);
 		const original = new Uint8Array(await this.store.readOriginal(file.path));
-		await this.store.atomicWrite(file.path, original);
+		await this.store.writeVaultPdf(file, original);
 		this.managed.delete(file.path);
 		await this.store.onDelete(file.path);
 		this.reloadViews(file);
@@ -530,39 +541,38 @@ class SettingsTab extends PluginSettingTab {
 				control: { type: 'dropdown', key: 'color', options: colorOptions, defaultValue: DEFAULTS.color },
 			},
 			{
-				name: 'Font file',
+				name: 'Font',
 				desc: 'A Helvetica-like font used on screen and in the PDF. Characters it lacks are drawn with the bundled fallback font.',
 				aliases: ['font', 'helvetica', 'arial'],
 				render: (setting) => {
-					let value = s.mainFontFile;
 					const status = setting.descEl.createDiv({ cls: 'ptb-setting-status', text: 'Loading…' });
 					void this.plugin.fonts.then((f) => status.setText(`In use: ${f.description}.`));
-					setting
-						.addText((t) =>
-							t
-								.setPlaceholder('Leave empty to use the bundled font')
-								.setValue(s.mainFontFile)
-								.onChange((v) => (value = v.trim())),
-						)
-						.addButton((b) =>
-							b.setButtonText('Apply').onClick(async () => {
-								s.mainFontFile = value;
-								await this.plugin.saveSettings();
-								await this.plugin.reloadFonts();
-								this.update();
-							}),
-						)
-						.addExtraButton((b) =>
-							b
-								.setIcon('rotate-ccw')
-								.setTooltip('Reset to the default for this system')
-								.onClick(async () => {
-									s.mainFontFile = defaultMainFontFile();
-									await this.plugin.saveSettings();
-									await this.plugin.reloadFonts();
-									this.update();
-								}),
-						);
+					const apply = async (name: string) => {
+						s.mainFont = name;
+						await this.plugin.saveSettings();
+						await this.plugin.reloadFonts();
+						this.update();
+					};
+					setting.addDropdown((d) => {
+						d.addOption('', 'DejaVu Sans (bundled)');
+						if (s.mainFont) d.addOption(s.mainFont, s.mainFont);
+						d.setValue(s.mainFont).onChange((v) => void apply(v));
+						void listInstalledFonts()
+							.then((fonts) => {
+								d.selectEl.empty();
+								d.addOption('', 'DejaVu Sans (bundled)');
+								for (const f of fonts) d.addOption(f.name, f.label);
+								if (s.mainFont && !fonts.some((f) => f.name === s.mainFont)) d.addOption(s.mainFont, `${s.mainFont} (not installed)`);
+								d.setValue(s.mainFont);
+							})
+							.catch((e) => console.warn('[pdf-textboxes] could not list installed fonts', e));
+					});
+					setting.addExtraButton((b) =>
+						b
+							.setIcon('rotate-ccw')
+							.setTooltip('Reset to the default for this system')
+							.onClick(() => void apply(defaultMainFont())),
+					);
 				},
 			},
 			{
