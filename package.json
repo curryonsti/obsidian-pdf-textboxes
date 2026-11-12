@@ -1,6 +1,6 @@
 {
 	"name": "pdf-textboxes",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"description": "Obsidian plugin: type notes onto PDFs and save them into the PDF as real text.",
 	"main": "main.js",
 	"type": "module",

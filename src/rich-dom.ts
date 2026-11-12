@@ -12,18 +12,17 @@ export function renderRich(el: HTMLElement, text: string, runs: StyleRun[] | und
 	el.empty();
 	for (const seg of segments(text, runs)) {
 		if (!seg.color && !seg.s) el.appendText(seg.text);
-		else el.appendChild(runElement(el.doc, seg, seg.text));
+		else runElement(el, seg, seg.text);
 	}
 }
 
-function runElement(doc: Document, style: CharStyle, text: string): HTMLElement {
-	const e = doc.createElement(style.s === '^' ? 'sup' : style.s === '_' ? 'sub' : 'span');
-	e.className = 'ptb-run';
+/** Appends a styled run (<span>/<sup>/<sub>) to `parent`. */
+function runElement(parent: HTMLElement, style: CharStyle, text: string): HTMLElement {
+	const e = parent.createEl(style.s === '^' ? 'sup' : style.s === '_' ? 'sub' : 'span', { cls: 'ptb-run', text });
 	if (style.color) {
 		e.dataset.color = style.color;
 		e.style.color = style.color;
 	}
-	e.textContent = text;
 	return e;
 }
 
@@ -73,7 +72,7 @@ export function offsetOf(root: HTMLElement, node: Node, offset: number): number 
 	const r = root.doc.createRange();
 	r.selectNodeContents(root);
 	r.setEnd(node, offset);
-	const tmp = root.doc.createElement('div');
+	const tmp = createDiv();
 	tmp.append(r.cloneContents());
 	return walk(tmp, tmp).text.length;
 }
@@ -137,7 +136,7 @@ export function startRunAtCaret(root: HTMLElement, range: Range, patch: StylePat
 	if (!style.color && !style.s) {
 		root.insertBefore(placeholder, ref);
 	} else {
-		const e = runElement(doc, style, '');
+		const e = runElement(root, style, ''); // appended, then moved into place
 		e.appendChild(placeholder);
 		root.insertBefore(e, ref);
 	}
