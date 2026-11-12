@@ -1,26 +1,19 @@
-import { Notice, setIcon, setTooltip, TFile } from 'obsidian';
+import { Keymap, Notice, setIcon, setTooltip, TFile } from 'obsidian';
 import { PdfPage, ViewerHandle } from './viewer-hooks';
-import { AnnotationDoc, BACKGROUNDS, BASELINE_OFFSET_EM, BG_PAD_EM, BoxHistory, LINE_HEIGHT, TextBox } from './types';
+import { AnnotationDoc, BACKGROUNDS, BG_PAD_EM, BoxHistory, CharStyle, LINE_HEIGHT, ScriptKind, TextBox } from './types';
+import { measureWrap, offsetOf, positionAt, readRich, renderRich, startRunAtCaret, StylePatch, styleAt } from './rich-dom';
+import { compactStyles, expandStyles } from './rich';
 
 export const COLORS = ['#000000', '#d00000', '#0050d0', '#008a00', '#e07000', '#8a2be2'];
 export const COLOR_NAMES = ['Black', 'Red', 'Blue', 'Green', 'Orange', 'Purple'];
 /** Symbol palette contents (rows of the grid). */
-export const SYMBOLS: { label: string; rows: string[][]; base?: string }[] = [
+export const SYMBOLS: { label: string; rows: string[][] }[] = [
 	{
 		label: 'Greek',
 		rows: [
 			[...'αβγδεζηθικλμν'],
 			[...'ξπρστυφχψωΓΔΘ'],
 			[...'ΛΞΠΣΦΨΩ'],
-		],
-	},
-	{
-		label: 'Superscript / subscript',
-		base: 'x', // shown faintly so the tiny glyphs are readable; not inserted
-		rows: [
-			[...'⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻ⁿ'],
-			[...'₀₁₂₃₄₅₆₇₈₉₊₋ᵢ'],
-			[...'ⱼₖₙₓ⁽⁾₍₎ⁱ'],
 		],
 	},
 	{
@@ -41,7 +34,6 @@ export interface OverlayHost {
 	ensureDoc(file: TFile): Promise<AnnotationDoc>;
 	/** Persist now (JSON) and schedule a bake. */
 	changed(file: TFile, doc: AnnotationDoc): void;
-	setEditing(file: TFile, editing: boolean): void;
 	zoomChanged(file: TFile, scaleValue: string | null): void;
 	style: { fontSize: number; color: string; bg: string | null };
 	/** Undo/redo stacks for a PDF (kept by the plugin so they survive file switches). */
@@ -59,7 +51,15 @@ export class PdfOverlay {
 	private unsubs: (() => void)[] = [];
 	private toolbarBtn: HTMLElement | null = null;
 	private tool: HTMLElement | null = null;
-	private panel: { el: HTMLElement; size: HTMLElement; swatches: HTMLElement[]; symBtn: HTMLElement; bgBtn: HTMLElement } | null = null;
+	private panel: {
+		el: HTMLElement;
+		size: HTMLElement;
+		swatches: HTMLElement[];
+		symBtn: HTMLElement;
+		bgBtn: HTMLElement;
+		supBtn: HTMLElement;
+		subBtn: HTMLElement;
+	} | null = null;
 	/** Box state when the current editing session started (one undo step per session). */
 	private editSnapshot: string | null = null;
 	private symbols: { el: HTMLElement; hint: HTMLElement } | null = null;
@@ -101,6 +101,14 @@ export class PdfOverlay {
 		};
 		win.addEventListener('pointerdown', onWinDown, true);
 		this.unsubs.push(() => win.removeEventListener('pointerdown', onWinDown, true));
+
+		// Keep the x²/x₂ buttons in sync with the caret while typing.
+		const doc = h.view.containerEl.doc;
+		const onSel = () => {
+			if (this.editingId) this.refreshStyleButtons();
+		};
+		doc.addEventListener('selectionchange', onSel);
+		this.unsubs.push(() => doc.removeEventListener('selectionchange', onSel));
 
 		const onDown = (ev: PointerEvent) => this.onViewerPointerDown(ev);
 		h.scrollEl.addEventListener('pointerdown', onDown, true);
@@ -230,7 +238,6 @@ export class PdfOverlay {
 		let layer = this.layers.get(page.pageNumber);
 		if (!layer) {
 			layer = createDiv('ptb-layer');
-			layer.dataset.page = String(page.pageNumber);
 			const n = page.pageNumber;
 			layer.addEventListener('pointerdown', (ev) => this.onLayerPointerDown(ev, n));
 			this.layers.set(n, layer);
@@ -255,10 +262,46 @@ export class PdfOverlay {
 		el.toggleClass('has-bg', !!box.bg);
 		el.style.backgroundColor = box.bg ?? '';
 		el.style.boxShadow = box.bg ? `0 0 0 ${BG_PAD_EM}em ${box.bg}` : '';
+		// A set width (from dragging an edge) wraps the text; it always wraps at
+		// the right edge of the page. Sizes in % of the page, so zoom just scales.
+		el.style.maxWidth = `${Math.max(0, (100 * (vp.width - vx)) / vp.width)}%`;
+		el.style.width = box.w ? `${(100 * box.w * vp.scale) / vp.width}%` : '';
+		el.style.minHeight = box.h ? `${(100 * box.h * vp.scale) / vp.height}%` : '';
 		const text = el.querySelector<HTMLElement>('.ptb-text')!;
-		if (this.editingId !== box.id && text.textContent !== box.text) text.textContent = box.text;
+		if (this.editingId !== box.id) renderRich(text, box.text, box.runs);
 		el.toggleClass('is-selected', this.selectedId === box.id);
 		el.toggleClass('is-editing', this.editingId === box.id);
+		this.syncWrap(box, el, page);
+	}
+
+	/**
+	 * Store where the browser wrapped the text (soft line breaks) and the text
+	 * width, so the baked PDF breaks the lines at exactly the same places.
+	 */
+	private syncWrap(box: TextBox, el: HTMLElement, page: PdfPage) {
+		const text = el.querySelector<HTMLElement>('.ptb-text');
+		if (!text || !el.isConnected) return;
+		const at = measureWrap(text, box.text.split('\n').length);
+		let wrap: TextBox['wrap'];
+		if (at.length || box.w) {
+			const layer = this.ensureLayer(page).getBoundingClientRect();
+			const k = layer.width ? page.viewport.width / layer.width : 1; // screen px -> viewport px
+			const width = (text.getBoundingClientRect().width * k) / page.viewport.scale;
+			wrap = { at, width: Math.round(width * 100) / 100 };
+		}
+		if (JSON.stringify(wrap ?? null) === JSON.stringify(box.wrap ?? null)) return;
+		const doc = this.host.getDoc(this.file);
+		if (!doc) return;
+		if (wrap) box.wrap = wrap;
+		else delete box.wrap;
+		this.host.changed(this.file, doc);
+	}
+
+	private syncWrapOf(id: string) {
+		const box = this.findBox(id);
+		const el = this.boxEls.get(id);
+		const page = box && this.handle.getPage(box.page);
+		if (box && el && page) this.syncWrap(box, el, page);
 	}
 
 	private createBoxEl(box: TextBox): HTMLElement {
@@ -266,15 +309,15 @@ export class PdfOverlay {
 		el.dataset.id = box.id;
 		el.tabIndex = 0;
 		const text = el.createDiv('ptb-text');
-		text.textContent = box.text;
-		text.addEventListener('input', () => this.onInput(box.id, text));
+		text.addEventListener('input', () => this.commitText(box.id, text));
 		text.addEventListener('blur', () => window.setTimeout(() => this.onTextBlur(box.id), 0));
 		el.addEventListener('pointerdown', (ev) => this.onBoxPointerDown(ev, box.id));
-		el.addEventListener('dblclick', (ev) => {
-			ev.stopPropagation();
-			this.startEditing(box.id);
-		});
 		el.addEventListener('keydown', (ev) => this.onBoxKey(ev, box.id));
+		// Resize handles (shown while selected): drag to change the box size.
+		for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
+			const h = el.createDiv(`ptb-handle ptb-handle-${dir}`);
+			h.addEventListener('pointerdown', (ev) => this.onHandlePointerDown(ev, box.id, dir));
+		}
 		this.boxEls.set(box.id, el);
 		return el;
 	}
@@ -292,6 +335,10 @@ export class PdfOverlay {
 			b.addEventListener('click', fn);
 			return b;
 		};
+		// Delete sits at the far left: it only shows while a box is selected, and
+		// the panel is anchored at the right, so nothing else moves.
+		btn('trash-2', 'Delete text box (⌫)', () => this.selectedId && this.deleteBox(this.selectedId), 'ptb-del');
+		el.createDiv('ptb-sep ptb-del');
 		btn('minus', 'Smaller', () => this.stepSize(-1));
 		const size = el.createDiv('ptb-size');
 		btn('plus', 'Larger', () => this.stepSize(+1));
@@ -305,10 +352,11 @@ export class PdfOverlay {
 		});
 		const bgBtn = btn('square', 'Background', () => this.cycleBackground(), 'ptb-bg-btn');
 		el.createDiv('ptb-sep');
-		const symBtn = btn('sigma', 'Symbols: Greek, ², math (⌘⇧G)', () => this.toggleSymbols());
-		el.createDiv('ptb-sep ptb-del');
-		btn('trash-2', 'Delete text box (⌫)', () => this.selectedId && this.deleteBox(this.selectedId), 'ptb-del');
-		this.panel = { el, size, swatches, symBtn, bgBtn };
+		const supBtn = btn('superscript', 'Superscript (⌘⇧.): selected text, or what you type next', () => this.toggleScript('^'));
+		const subBtn = btn('subscript', 'Subscript (⌘⇧,): selected text, or what you type next', () => this.toggleScript('_'));
+		el.createDiv('ptb-sep');
+		const symBtn = btn('sigma', 'Symbols: Greek and math (⌘⇧G)', () => this.toggleSymbols());
+		this.panel = { el, size, swatches, symBtn, bgBtn, supBtn, subBtn };
 		this.buildSymbols(tool);
 		this.refreshPanel();
 	}
@@ -334,9 +382,7 @@ export class PdfOverlay {
 			for (const row of group.rows) {
 				for (const sym of row) {
 					const b = grid.createDiv('ptb-sym');
-					if (group.base) b.createSpan({ cls: 'ptb-sym-base', text: group.base });
 					b.appendText(sym);
-					b.dataset.sym = sym;
 					b.addEventListener('click', () => this.insertSymbol(sym));
 				}
 			}
@@ -364,10 +410,11 @@ export class PdfOverlay {
 			return;
 		}
 		if (this.editingId !== id) this.startEditing(id);
-		const text = this.boxEls.get(id)?.querySelector<HTMLElement>('.ptb-text');
-		if (text && !text.contains(text.doc.activeElement)) this.focusText(id);
-		if (text) insertAtCaret(text, sym);
-		if (text) this.commitText(id, text);
+		const text = this.textEl(id);
+		if (!text) return;
+		if (!text.contains(text.doc.activeElement)) this.focusText(id);
+		insertAtCaret(text, sym);
+		this.commitText(id, text);
 	}
 
 	/** Open the panel while a box is selected or placement mode is on, and show current values. */
@@ -375,19 +422,132 @@ export class PdfOverlay {
 		if (!this.panel || !this.tool) return;
 		const box = this.selectedId ? this.findBox(this.selectedId) : undefined;
 		const fontSize = box?.fontSize ?? this.host.style.fontSize;
-		const color = box?.color ?? this.host.style.color;
 		const open = !!box || this.addMode;
 		this.tool.toggleClass('is-open', open);
 		this.panel.symBtn.toggleClass('is-active', this.host.ui.symbolsOpen);
 		this.symbols?.el.toggleClass('is-open', open && this.host.ui.symbolsOpen);
 		this.panel.el.toggleClass('has-box', !!box);
 		this.panel.size.textContent = String(fontSize);
-		this.panel.swatches.forEach((sw) => sw.toggleClass('is-active', sw.dataset.color === color));
 		const bg = box ? (box.bg ?? null) : this.host.style.bg;
 		const bgLabel = BACKGROUNDS.find((b) => b.color === bg)?.label ?? 'none';
 		this.panel.bgBtn.style.setProperty('--ptb-bg', bg ?? 'transparent');
 		this.panel.bgBtn.toggleClass('is-active', !!bg);
 		setTooltip(this.panel.bgBtn, `Background: ${bgLabel} (click to change)`);
+		this.refreshStyleButtons();
+	}
+
+	/**
+	 * Colour swatches and x²/x₂ show the style at the caret while typing, or
+	 * of the whole box when it is only selected.
+	 */
+	private refreshStyleButtons() {
+		if (!this.panel) return;
+		const id = this.editingId ?? this.selectedId;
+		const box = id ? this.findBox(id) : undefined;
+		let color = box?.color ?? this.host.style.color;
+		let s: ScriptKind | null = null;
+		const text = id ? this.textEl(id) : null;
+		if (box && text && this.editingId === id) {
+			const sel = text.win.getSelection();
+			if (sel?.rangeCount && text.contains(sel.anchorNode)) {
+				const st = styleAt(sel.anchorNode, text);
+				color = st.color ?? box.color;
+				s = st.s ?? null;
+			}
+		} else if (box) {
+			const chars = expandStyles(box.text, box.runs).filter((_, i) => box.text[i] !== '\n');
+			const colors = new Set(chars.map((c) => c.color ?? box.color));
+			color = colors.size === 1 ? [...colors][0]! : '';
+			if (chars.length && chars.every((c) => c.s === chars[0]!.s)) s = chars[0]!.s ?? null;
+		}
+		this.panel.swatches.forEach((sw) => sw.toggleClass('is-active', sw.dataset.color === color));
+		this.panel.supBtn.toggleClass('is-active', s === '^');
+		this.panel.subBtn.toggleClass('is-active', s === '_');
+	}
+
+	private textEl(id: string) {
+		return this.boxEls.get(id)?.querySelector<HTMLElement>('.ptb-text') ?? null;
+	}
+
+	/** x² / x₂ (also the Superscript/Subscript commands). */
+	toggleScript(kind: ScriptKind) {
+		this.applyStyle(
+			(cur) => ({ s: cur.every((c) => c.s === kind) ? null : kind }),
+			(st) => ({ s: st.s === kind ? null : kind }),
+		);
+	}
+
+	/**
+	 * Applies a style change where the user expects it:
+	 *  - typing with text selected: to the selected characters;
+	 *  - typing without a selection: to what is typed next (from the caret on);
+	 *  - box selected, not typing: to all of its text.
+	 * `forRange` gets the current styles of the affected characters,
+	 * `forCaret` the style at the caret.
+	 */
+	private applyStyle(forRange: (cur: CharStyle[]) => StylePatch, forCaret: (st: CharStyle) => StylePatch) {
+		const id = this.editingId ?? this.selectedId;
+		const box = id ? this.findBox(id) : undefined;
+		const text = id ? this.textEl(id) : null;
+		if (!id || !box || !text) {
+			new Notice('Select a text box or click into one first');
+			return;
+		}
+		const patchRange = (b: TextBox, from: number, to: number) => {
+			const chars = expandStyles(b.text, b.runs);
+			const idx: number[] = [];
+			for (let i = from; i < to; i++) if (b.text[i] !== '\n') idx.push(i);
+			const patch = forRange(idx.map((i) => chars[i]!));
+			for (const i of idx) {
+				const c = { ...chars[i] };
+				if (patch.color !== undefined) {
+					if (patch.color === null || patch.color === b.color) delete c.color;
+					else c.color = patch.color;
+				}
+				if (patch.s !== undefined) {
+					if (patch.s === null) delete c.s;
+					else c.s = patch.s;
+				}
+				chars[i] = c;
+			}
+			const runs = compactStyles(b.text, chars);
+			if (runs) b.runs = runs;
+			else delete b.runs;
+		};
+		if (this.editingId !== id) {
+			this.checkpoint();
+			this.update(id, (b) => patchRange(b, 0, b.text.length));
+			this.refreshPanel();
+			return;
+		}
+		const sel = text.win.getSelection();
+		let range = sel?.rangeCount ? sel.getRangeAt(0) : null;
+		if (!range || !text.contains(range.startContainer) || !text.contains(range.endContainer)) {
+			this.focusText(id);
+			range = sel?.rangeCount ? sel.getRangeAt(0) : null;
+			if (!range) return;
+		}
+		if (range.collapsed) {
+			const patch = forCaret(styleAt(range.startContainer, text));
+			if (patch.color && patch.color === box.color) patch.color = null;
+			startRunAtCaret(text, range, patch);
+		} else {
+			this.commitText(id, text);
+			const from = offsetOf(text, range.startContainer, range.startOffset);
+			const to = offsetOf(text, range.endContainer, range.endOffset);
+			this.update(id, (b) => patchRange(b, from, to), false);
+			const b = this.findBox(id)!;
+			renderRich(text, b.text, b.runs);
+			const a = positionAt(text, from);
+			const z = positionAt(text, to);
+			const r = text.doc.createRange();
+			r.setStart(a.node, a.offset);
+			r.setEnd(z.node, z.offset);
+			sel?.removeAllRanges();
+			sel?.addRange(r);
+			this.syncWrapOf(id);
+		}
+		this.refreshStyleButtons();
 	}
 
 	/** none → white → yellow → none, for the selected box or the next new box. */
@@ -419,12 +579,28 @@ export class PdfOverlay {
 		this.refreshPanel();
 	}
 
+	/** Colour for the selection / what is typed next / the whole box (see applyStyle). */
 	private setColor(c: string) {
 		this.host.style.color = c;
-		const box = this.selectedId ? this.findBox(this.selectedId) : undefined;
-		if (box && box.color !== c) {
-			this.checkpoint();
-			this.update(box.id, (b) => (b.color = c));
+		const id = this.editingId ?? this.selectedId;
+		const box = id ? this.findBox(id) : undefined;
+		if (box && this.editingId !== id) {
+			// Whole box: the box colour, and no differently coloured parts left.
+			const chars = expandStyles(box.text, box.runs).map((ch) => ({ ...ch, color: undefined }));
+			const cleaned = compactStyles(box.text, chars);
+			if (box.color !== c || JSON.stringify(cleaned ?? null) !== JSON.stringify(box.runs ?? null)) {
+				this.checkpoint();
+				this.update(box.id, (b) => {
+					b.color = c;
+					if (cleaned) b.runs = cleaned;
+					else delete b.runs;
+				});
+			}
+		} else if (box) {
+			this.applyStyle(
+				() => ({ color: c }),
+				() => ({ color: c }),
+			);
 		}
 		this.refreshPanel();
 	}
@@ -434,52 +610,57 @@ export class PdfOverlay {
 	private select(id: string | null) {
 		if (this.selectedId === id) return;
 		if (this.editingId && this.editingId !== id) this.finishEditing();
+		// A deselected box must not keep keyboard focus (and with it a focus outline).
+		const prev = this.selectedId ? this.boxEls.get(this.selectedId) : null;
+		if (prev?.contains(prev.doc.activeElement)) prev.blur();
 		this.selectedId = id;
 		this.boxEls.forEach((el, bid) => el.toggleClass('is-selected', bid === id));
 		if (id) this.boxEls.get(id)?.focus({ preventScroll: true });
 		this.refreshPanel();
 	}
 
-	startEditing(id: string) {
+	/** Start typing in a box; the caret goes to the clicked point `at`, or to the end. */
+	startEditing(id: string, at?: { x: number; y: number }) {
 		this.select(id);
 		this.editSnapshot ??= this.snapshot();
 		this.editingId = id;
 		const el = this.boxEls.get(id);
 		if (!el) return;
 		el.addClass('is-editing');
-		this.host.setEditing(this.file, true);
-		this.focusText(id, true);
+		this.focusText(id, at);
 	}
 
-	private focusText(id: string, selectEnd = true) {
-		const text = this.boxEls.get(id)?.querySelector<HTMLElement>('.ptb-text');
+	private focusText(id: string, at?: { x: number; y: number }) {
+		const text = this.textEl(id);
 		if (!text) return;
 		text.contentEditable = 'plaintext-only';
 		text.spellcheck = false;
 		text.focus({ preventScroll: true });
-		if (selectEnd) {
-			const range = text.doc.createRange();
+		const range = text.doc.createRange();
+		const pos = at ? text.doc.caretPositionFromPoint(at.x, at.y) : null;
+		if (pos && text.contains(pos.offsetNode)) {
+			range.setStart(pos.offsetNode, pos.offset);
+		} else {
 			range.selectNodeContents(text);
 			range.collapse(false);
-			const sel = text.win.getSelection();
-			sel?.removeAllRanges();
-			sel?.addRange(range);
 		}
+		const sel = text.win.getSelection();
+		sel?.removeAllRanges();
+		sel?.addRange(range);
 	}
 
 	finishEditing() {
 		const id = this.editingId;
 		if (!id) return;
 		this.editingId = null;
-		this.host.setEditing(this.file, false);
 		const el = this.boxEls.get(id);
 		const text = el?.querySelector<HTMLElement>('.ptb-text');
 		if (text) {
 			text.contentEditable = 'false';
 			this.commitText(id, text);
-			// Editing may leave <div>/<br> structure; normalise to plain text.
+			// Editing may leave <div>/<br> structure and caret placeholders; re-render.
 			const committed = this.findBox(id);
-			if (committed) text.textContent = committed.text;
+			if (committed) renderRich(text, committed.text, committed.runs);
 		}
 		el?.removeClass('is-editing');
 		const box = this.findBox(id);
@@ -500,18 +681,32 @@ export class PdfOverlay {
 		if (this.selectedId === id && !el.contains(el.doc.activeElement)) this.select(null);
 	}
 
-	private onInput(id: string, text: HTMLElement) {
-		this.commitText(id, text);
-	}
-
 	private commitText(id: string, text: HTMLElement) {
-		const value = text.innerText.replace(/\r/g, '').replace(/\n$/, '');
+		const value = readRich(text);
 		const box = this.findBox(id);
-		if (box && box.text !== value) this.update(id, (b) => (b.text = value), false);
+		if (box && (box.text !== value.text || JSON.stringify(box.runs ?? null) !== JSON.stringify(value.runs ?? null))) {
+			this.update(
+				id,
+				(b) => {
+					b.text = value.text;
+					if (value.runs) b.runs = value.runs;
+					else delete b.runs;
+				},
+				false,
+			);
+		}
+		this.syncWrapOf(id);
 	}
 
 	private onBoxKey(ev: KeyboardEvent, id: string) {
 		ev.stopPropagation(); // keep Obsidian / pdf.js shortcuts (arrows etc.) out
+		// ⌘⇧. superscript, ⌘⇧, subscript (Ctrl on Windows/Linux). Physical keys, so
+		// any keyboard layout works; ⌘, alone is taken by Obsidian's settings.
+		if (Keymap.isModifier(ev, 'Mod') && ev.shiftKey && !ev.altKey && (ev.code === 'Period' || ev.code === 'Comma')) {
+			ev.preventDefault();
+			this.toggleScript(ev.code === 'Period' ? '^' : '_');
+			return;
+		}
 		if (this.editingId === id) {
 			if (ev.key === 'Escape') {
 				ev.preventDefault();
@@ -586,8 +781,8 @@ export class PdfOverlay {
 		const { fontSize } = this.host.style;
 		const color = this.host.style.color;
 		const [vx, vy] = this.eventToViewport(page, ev);
-		// Put the caret's baseline roughly where the user clicked.
-		const topVy = vy - fontSize * page.viewport.scale * BASELINE_OFFSET_EM * 0.8;
+		// Centre the first line (and the caret) vertically on the click point.
+		const topVy = vy - (fontSize * page.viewport.scale * LINE_HEIGHT) / 2;
 		const [x, y] = page.viewport.convertToPdfPoint(vx, topVy) as [number, number];
 		let doc: AnnotationDoc;
 		try {
@@ -617,11 +812,12 @@ export class PdfOverlay {
 	private onBoxPointerDown(ev: PointerEvent, id: string) {
 		if (ev.button !== 0) return;
 		ev.stopPropagation();
+		if (this.editingId === id) return; // caret placement / text selection
+		ev.preventDefault();
 		const el = this.boxEls.get(id)!;
-		const editing = this.editingId === id;
-		const onGrip = (ev.target as HTMLElement).closest('.ptb-grip, .ptb-box:not(.is-editing)');
-		if (editing && !onGrip) return; // caret placement / text selection
-		if (!editing) ev.preventDefault();
+		// A click on the already selected box starts typing there (so does the
+		// second click of a double-click on an unselected box).
+		const wasSelected = this.selectedId === id;
 
 		const box = this.findBox(id);
 		const page = box && this.handle.getPage(box.page);
@@ -653,18 +849,95 @@ export class PdfOverlay {
 			el.removeEventListener('pointerup', up);
 			el.removeEventListener('pointercancel', up);
 			if (!dragging) {
-				if (!editing) this.select(id);
+				if (wasSelected) this.startEditing(id, { x: e.clientX, y: e.clientY });
+				else this.select(id);
 				return;
 			}
 			el.removeClass('is-dragging');
 			const [vx, vy] = at(e);
 			const [x, y] = vp.convertToPdfPoint(vx, vy) as [number, number];
-			if (!editing) this.checkpoint(); // while editing, the session step covers it
+			this.checkpoint();
 			this.update(id, (b) => {
 				b.x = round(x);
 				b.y = round(y);
 			});
-			if (!editing) this.select(id);
+			this.select(id);
+		};
+		el.addEventListener('pointermove', move);
+		el.addEventListener('pointerup', up);
+		el.addEventListener('pointercancel', up);
+	}
+
+	/**
+	 * Drag a handle to resize the box: the font size stays, the text wraps to
+	 * the new width. Left/top handles move that edge (the opposite one stays).
+	 */
+	private onHandlePointerDown(ev: PointerEvent, id: string, dir: string) {
+		if (ev.button !== 0) return;
+		ev.stopPropagation();
+		ev.preventDefault();
+		const el = this.boxEls.get(id);
+		const box = this.findBox(id);
+		const page = box && this.handle.getPage(box.page);
+		if (!el || !box || !page) return;
+		if (this.selectedId !== id) this.select(id);
+		const vp = page.viewport;
+		const layer = this.ensureLayer(page).getBoundingClientRect();
+		const k = vp.width / layer.width; // screen px -> viewport px
+		const r0 = el.getBoundingClientRect();
+		const left0 = (r0.left - layer.left) * k;
+		const top0 = (r0.top - layer.top) * k;
+		const w0 = r0.width * k;
+		const h0 = r0.height * k;
+		const minW = box.fontSize * vp.scale * 1.5;
+		const minH = box.fontSize * vp.scale * LINE_HEIGHT;
+		const startX = ev.clientX;
+		const startY = ev.clientY;
+		let rect = { left: left0, top: top0, w: w0, h: h0 };
+		el.addClass('is-resizing');
+		el.setPointerCapture(ev.pointerId);
+
+		const calc = (e: PointerEvent) => {
+			const dx = (e.clientX - startX) * k;
+			const dy = (e.clientY - startY) * k;
+			let { left, top } = { left: left0, top: top0 };
+			let w = w0;
+			let h = h0;
+			if (dir.includes('e')) w = Math.max(minW, w0 + dx);
+			if (dir.includes('w')) {
+				w = Math.max(minW, w0 - dx);
+				left = left0 + w0 - w;
+			}
+			if (dir.includes('s')) h = Math.max(minH, h0 + dy);
+			if (dir.includes('n')) {
+				h = Math.max(minH, h0 - dy);
+				top = top0 + h0 - h;
+			}
+			w = Math.min(w, vp.width - left);
+			return { left, top, w, h };
+		};
+		const move = (e: PointerEvent) => {
+			rect = calc(e);
+			el.style.left = `${(100 * rect.left) / vp.width}%`;
+			el.style.top = `${(100 * rect.top) / vp.height}%`;
+			if (dir !== 'n' && dir !== 's') el.style.width = `${(100 * rect.w) / vp.width}%`;
+			if (dir !== 'e' && dir !== 'w') el.style.minHeight = `${(100 * rect.h) / vp.height}%`;
+		};
+		const up = (e: PointerEvent) => {
+			el.removeEventListener('pointermove', move);
+			el.removeEventListener('pointerup', up);
+			el.removeEventListener('pointercancel', up);
+			el.removeClass('is-resizing');
+			rect = calc(e);
+			const [x, y] = vp.convertToPdfPoint(rect.left, rect.top) as [number, number];
+			const editing = this.editingId === id;
+			if (!editing) this.checkpoint();
+			this.update(id, (b) => {
+				b.x = round(x);
+				b.y = round(y);
+				if (dir !== 'n' && dir !== 's') b.w = round(rect.w / vp.scale);
+				if (dir !== 'e' && dir !== 'w') b.h = round(rect.h / vp.scale);
+			});
 		};
 		el.addEventListener('pointermove', move);
 		el.addEventListener('pointerup', up);
@@ -698,8 +971,7 @@ export class PdfOverlay {
 		}
 		if (this.editingId === id) {
 			this.editingId = null;
-			this.host.setEditing(this.file, false);
-		}
+			}
 		if (this.selectedId === id) this.selectedId = null;
 		doc.boxes = doc.boxes.filter((b) => b.id !== id);
 		this.host.changed(this.file, doc);

@@ -5,7 +5,7 @@ written **into the PDF itself as real, searchable text**, so any app or AI tool
 that reads the PDF also sees them. They stay editable in Obsidian.
 
 - Click on a page to place a text box, type, drag it around, change size, colour and background
-- German and other accented characters, Greek letters, super/subscripts and math symbols, with a symbol palette
+- German and other accented characters, superscript and subscript for any character, Greek letters and math symbols from a symbol palette
 - Undo/redo for everything you do with the boxes
 - Works on top of Obsidian's own PDF viewer: search, outline, zoom and links stay as they are
 - The untouched original of every PDF is kept, so you can always go back
@@ -33,10 +33,12 @@ Install the *BRAT* community plugin, then *Add beta plugin* with this repository
 |---|---|
 | Place a text box | Press **T** (or click the **T** button in the PDF toolbar), then click on the page. **⌥/Alt-click** works anytime. |
 | Leave placement mode | **T** again or **Esc** |
-| Edit | Double-click a box (or select it and press **Enter**) |
+| Edit | Click a selected box (or double-click any box) to type where you clicked; **Enter** on a selected box types at the end |
 | Move | Drag the box |
-| Size, colour, background, delete | Select a box; a small panel slides out next to the **T** button |
-| Symbols (α, ², ₁, ≤, ∈ …) | **⌘⇧G / Ctrl+Shift+G** or the **Σ** button; click a symbol to insert it |
+| Resize | Select a box and drag an edge or corner. The font size stays; the text wraps to the new width. Text also wraps at the right edge of the page. |
+| Font size, background, delete | Select a box; a small panel slides out next to the **T** button |
+| Colour, superscript, subscript | The colour dots and the **x²** / **x₂** buttons in the panel. While typing they apply to the selected text, or (nothing selected) to what you type next, so one box can mix colours and super/subscripts. With a box selected but not in edit mode, they change the whole box. Shortcuts: **⌘⇧.** superscript, **⌘⇧,** subscript (Ctrl+Shift on Windows/Linux). |
+| Symbols (α, ≤, ∈ …) | **⌘⇧G / Ctrl+Shift+G** or the **Σ** button; click a symbol to insert it |
 | Delete | Select the box and press **Backspace/Delete** |
 | Undo / redo | **⌘Z / ⌘⇧Z** (Ctrl on Windows/Linux) while the PDF is active |
 
@@ -44,7 +46,7 @@ Clicking outside a box (or outside the symbol palette) only closes it; the next 
 
 Commands (command palette): *Write text boxes into this PDF now*, *Use the current PDF
 file as the new original*, *Remove all text boxes and restore the original PDF*,
-*Toggle text box placement mode*, *Toggle symbol panel*.
+*Toggle text box placement mode*, *Toggle symbol panel*, *Superscript*, *Subscript*.
 
 ## What happens to your PDFs
 

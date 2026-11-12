@@ -21,7 +21,43 @@ export interface TextBox {
 	color: string;
 	/** Optional background fill behind the text (CSS hex), drawn into the PDF too. */
 	bg?: string | null;
+	/**
+	 * Character styles as consecutive runs over `text` (lengths add up to
+	 * text.length): colour (default: `color`) and superscript/subscript.
+	 * Missing = all characters in the box colour, normal position.
+	 */
+	runs?: StyleRun[];
+	/** Box width in points set by dragging its edges; the text wraps to fit. Missing = as wide as the text. */
+	w?: number;
+	/** Minimum box height in points set by dragging; the box still grows if the text needs more. */
+	h?: number;
+	/**
+	 * The layout the overlay showed, so the PDF matches it exactly: `at` =
+	 * offsets of characters that start a new line because the text wrapped
+	 * (at the box width or the page edge), `width` = the box's text width in
+	 * points. Present when the text wraps or the box has a set width.
+	 */
+	wrap?: { at: number[]; width: number };
 }
+
+export type ScriptKind = '^' | '_';
+export interface CharStyle {
+	/** CSS hex colour; missing = the box colour. */
+	color?: string;
+	/** '^' superscript, '_' subscript. */
+	s?: ScriptKind;
+}
+export interface StyleRun extends CharStyle {
+	len: number;
+}
+
+/**
+ * Superscript/subscript geometry, in em of the box's font size. The overlay
+ * (styles.css: `.ptb-text sup/sub`) and the baker must use the same values.
+ */
+export const SCRIPT_SCALE = 0.65;
+export const SUP_RISE_EM = 0.33;
+export const SUB_DROP_EM = 0.14;
 
 /** Background padding around the text, in em (overlay box-shadow and baked rectangle). */
 export const BG_PAD_EM = 0.15;
@@ -87,5 +123,3 @@ export type BakeResponse =
 
 /** Layout constants shared by the overlay and the baker so both match. */
 export const LINE_HEIGHT = 1.2;
-/** Approximate top-of-line to baseline distance (em); only used to place a new box under the click. */
-export const BASELINE_OFFSET_EM = 0.94;

@@ -47,7 +47,7 @@ export class Store {
 		if (target === this.root) return null;
 		if (target.startsWith(this.root + '/') || this.root.startsWith(target + '/')) return 'The new folder cannot be inside the old one (or the other way round).';
 		if (await this.adapter.exists(target)) return `“${target}” already exists. Choose a new folder name.`;
-		await Promise.all([...this.writeChainsList()].map((p) => p.catch(() => undefined)));
+		await Promise.all([...this.pendingWrites].map((p) => p.catch(() => undefined)));
 		if (await this.adapter.exists(this.root)) {
 			if (parentOf(target)) await this.adapter.mkdir(parentOf(target));
 			await this.adapter.rename(this.root, target);
@@ -57,9 +57,6 @@ export class Store {
 	}
 
 	private pendingWrites = new Set<Promise<void>>();
-	private writeChainsList() {
-		return this.pendingWrites;
-	}
 
 	get adapter(): DataAdapter {
 		return this.app.vault.adapter;
@@ -110,7 +107,7 @@ export class Store {
 		const existing = await this.load(pdfPath);
 		if (existing && (await this.hasOriginal(pdfPath))) return existing;
 		const bytes = new Uint8Array(await this.readVaultFile(pdfPath));
-		await this.mkdirp(this.dataDir(pdfPath));
+		await this.adapter.mkdir(this.dataDir(pdfPath));
 		await this.replaceFile(this.originalPath(pdfPath), bytes);
 		const doc: AnnotationDoc = existing ?? {
 			version: 1,
@@ -142,7 +139,7 @@ export class Store {
 				// Serialise at write time so the latest state is written, at the
 				// path the doc has now (it may have been renamed while queued).
 				const json = JSON.stringify(doc, null, 1);
-				await this.mkdirp(this.dataDir(doc.pdfPath));
+				await this.adapter.mkdir(this.dataDir(doc.pdfPath));
 				await this.replaceFile(this.docPath(doc.pdfPath), json);
 			});
 		this.queuedWrites.set(doc, next);
@@ -268,10 +265,6 @@ export class Store {
 	}
 
 	// ---------- low level ----------
-
-	async mkdirp(dir: string) {
-		await this.adapter.mkdir(dir);
-	}
 
 	/** Reads a file in the vault (the visible PDF), through the Vault API when it is indexed. */
 	async readVaultFile(path: string): Promise<ArrayBuffer> {

@@ -33,7 +33,6 @@ export interface PdfViewport {
 	width: number;
 	height: number;
 	scale: number;
-	rotation: number;
 	convertToPdfPoint(x: number, y: number): number[];
 	convertToViewportPoint(x: number, y: number): number[];
 }
@@ -44,13 +43,12 @@ export interface PdfPage {
 	viewport: PdfViewport;
 }
 
-export type ViewerEvent = 'pagerendered' | 'scalechanging' | 'pagesinit' | 'pagesloaded' | 'pagesdestroy';
+export type ViewerEvent = 'pagerendered' | 'scalechanging' | 'pagesinit';
 
 /** Stable, typed facade over one loaded PDF viewer. */
 export interface ViewerHandle {
 	view: FileView;
 	file: TFile;
-	pagesCount(): number;
 	/** pdf.js currentScaleValue: "page-width", "auto", ... or a scale like "1.25". */
 	scaleValue(): string | null;
 	getPage(pageNumber: number): PdfPage | null;
@@ -77,8 +75,6 @@ export interface HookCallbacks {
 
 // ---------- Typed shapes of the private objects we touch (see header) ----------
 
-type FileArg = TFile;
-
 interface PdfJsEventBus {
 	on(name: string, fn: (e?: { pageNumber?: number }) => void): void;
 	off(name: string, fn: (e?: { pageNumber?: number }) => void): void;
@@ -90,7 +86,6 @@ interface PdfJsPageView {
 }
 
 interface PdfJsViewer {
-	pagesCount?: number;
 	currentScaleValue?: string | number | null;
 	container?: HTMLElement;
 	getPageView?(index: number): PdfJsPageView | undefined;
@@ -109,7 +104,7 @@ interface PdfApp {
 	subpath?: string | null;
 	getInitialViewOverrides?: (...args: unknown[]) => InitialViewOverrides;
 	__ptbPatched?: boolean;
-	__ptbFile?: FileArg;
+	__ptbFile?: TFile;
 }
 
 interface PdfChild {
@@ -118,13 +113,13 @@ interface PdfChild {
 }
 
 interface ViewerWrapper {
-	loadFile(file: FileArg, subpath?: string): Promise<unknown>;
+	loadFile(file: TFile, subpath?: string): Promise<unknown>;
 	then(cb: (child: PdfChild) => void): void;
 }
 
 type PdfViewInternal = FileView & {
 	viewer?: ViewerWrapper;
-	onModify?: (file: FileArg) => unknown;
+	onModify?: (file: TFile) => unknown;
 	__ptbPatched?: boolean;
 };
 
@@ -150,7 +145,6 @@ function internals(app: App): AppInternal {
 
 export class ViewerHooks {
 	private origFactory: ViewFactory | null = null;
-	ok = true;
 
 	constructor(
 		private app: App,
@@ -162,7 +156,6 @@ export class ViewerHooks {
 		const factory = registry?.pdf;
 		if (!registry || typeof factory !== 'function') {
 			console.error('[pdf-textboxes] viewRegistry.viewByType.pdf not found – viewer internals changed');
-			this.ok = false;
 			return false;
 		}
 		this.origFactory = factory;
@@ -188,7 +181,7 @@ export class ViewerHooks {
 	}
 
 	/** Re-create a PDF leaf's view (keeps the file open, resets scroll). */
-	rebuild(leaf: WorkspaceLeaf) {
+	private rebuild(leaf: WorkspaceLeaf) {
 		const l = leaf as WorkspaceLeaf & { rebuildView?: () => unknown };
 		if (typeof l.rebuildView === 'function') void Promise.resolve(l.rebuildView()).catch((e) => console.error(e));
 	}
@@ -208,7 +201,7 @@ export class ViewerHooks {
 		//    PDF never reloads the view while you work.
 		const origOnModify = v.onModify;
 		if (typeof origOnModify === 'function') {
-			v.onModify = function (this: PdfViewInternal, file: FileArg) {
+			v.onModify = function (this: PdfViewInternal, file: TFile) {
 				if (file === this.file && cb.isOwnWrite(file)) return;
 				return origOnModify.call(this, file);
 			};
@@ -220,7 +213,7 @@ export class ViewerHooks {
 		const wrapper = v.viewer;
 		if (wrapper && typeof wrapper.loadFile === 'function') {
 			const origLoad = wrapper.loadFile.bind(wrapper);
-			wrapper.loadFile = async (file: FileArg, subpath?: string) => {
+			wrapper.loadFile = async (file: TFile, subpath?: string) => {
 				try {
 					await cb.prepare(file);
 				} catch (e) {
@@ -237,7 +230,7 @@ export class ViewerHooks {
 		}
 
 		const origUnload = v.onUnloadFile.bind(v);
-		v.onUnloadFile = (file: FileArg) => {
+		v.onUnloadFile = (file: TFile) => {
 			try {
 				cb.onUnload(v, file);
 			} catch (e) {
@@ -246,7 +239,7 @@ export class ViewerHooks {
 			return origUnload(file);
 		};
 
-		const patchChild = (child: PdfChild, file: FileArg) => {
+		const patchChild = (child: PdfChild, file: TFile) => {
 			const app = child.pdfViewer;
 			if (!app) return;
 			app.__ptbFile = file;
@@ -282,7 +275,7 @@ export class ViewerHooks {
 	}
 }
 
-function makeHandle(view: FileView, child: PdfChild, file: FileArg): ViewerHandle | null {
+function makeHandle(view: FileView, child: PdfChild, file: TFile): ViewerHandle | null {
 	const app = child.pdfViewer;
 	const pdfViewer = app?.pdfViewer;
 	const scrollEl = app?.dom?.viewerContainerEl ?? pdfViewer?.container;
@@ -295,7 +288,6 @@ function makeHandle(view: FileView, child: PdfChild, file: FileArg): ViewerHandl
 		file,
 		scrollEl,
 		toolbarEl: child.toolbar?.toolbarRightEl ?? null,
-		pagesCount: () => pdfViewer.pagesCount ?? 0,
 		scaleValue: () => (pdfViewer.currentScaleValue != null ? String(pdfViewer.currentScaleValue) : null),
 		getPage(pageNumber) {
 			const pv = pdfViewer.getPageView?.(pageNumber - 1);

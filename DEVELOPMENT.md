@@ -37,7 +37,8 @@ Always test on copies of PDFs.
 | Piece | File | Role |
 |---|---|---|
 | Viewer internals | `src/viewer-hooks.ts` | **The only file that touches private Obsidian/pdf.js objects.** Fix this first after an Obsidian update. |
-| Overlay | `src/overlay.ts` | Text box UI per page, style panel, symbol palette, undo/redo; re-attaches on `pagerendered`. |
+| Overlay | `src/overlay.ts` | Text box UI per page, style panel, symbol palette, resizing, undo/redo; re-attaches on `pagerendered`. |
+| Rich text | `src/rich.ts`, `src/rich-dom.ts` | Per-character colour and superscript/subscript (`runs`), reading/writing them in the editable DOM, and measuring where the browser wrapped lines (`wrap`), which the baker reuses. |
 | Storage | `src/store.ts` | `<data folder>/<pdf path>/annotations.json` + `original.pdf`; atomic writes; rename/delete. |
 | Scheduler | `src/baker.ts` | When to rebuild; runs the worker; writes the visible PDF with `vault.modifyBinary` (re-baked on open if a write was interrupted). |
 | Bake | `src/bake.ts`, `src/bake.worker.ts` | original + boxes → new PDF (pdf-lib), PDF inspection (signed/encrypted/forms). |

@@ -1,7 +1,7 @@
 {
 	"id": "pdf-textboxes",
 	"name": "PDF Text Boxes",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"minAppVersion": "1.15.0",
 	"description": "Type notes onto PDFs in the built-in viewer. Notes are saved into the PDF as real, searchable text and stay editable.",
 	"author": "curryonsti",

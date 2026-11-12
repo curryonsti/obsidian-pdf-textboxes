@@ -8,12 +8,6 @@ interface OwnWrite {
 	mtime: number;
 }
 
-export interface BakeResult {
-	path: string;
-	ms: number;
-	totalMs: number;
-}
-
 /**
  * Decides *when* to rebuild the visible PDF and does it in a Web Worker:
  *  - `schedule()` after every change: bakes once you pause for `idleMs`
@@ -30,7 +24,7 @@ export class Baker {
 	private running = new Map<string, Promise<void>>();
 	private rerun = new Set<string>();
 	private ownWrites = new Map<string, OwnWrite>();
-	onStatus: (path: string, state: 'baking' | 'done' | 'error', info?: BakeResult | string) => void = () => {};
+	onStatus: (path: string, state: 'baking' | 'done' | 'error', info?: { ms: number } | string) => void = () => {};
 
 	constructor(
 		private app: App,
@@ -76,10 +70,6 @@ export class Baker {
 				void this.bakeNow(path);
 			}, delay),
 		);
-	}
-
-	hasPending(path: string) {
-		return this.timers.has(path) || this.running.has(path);
 	}
 
 	/** Bake now if the visible PDF is behind the JSON. Resolves when written. */
@@ -145,7 +135,7 @@ export class Baker {
 				// Mid-rename (the data folder is still moving): try again shortly.
 				// Deleted files drop out of the store's cache and are not retried.
 				if (this.store.cachedDoc(doc.pdfPath) === doc) this.schedule(doc.pdfPath, 500);
-				this.onStatus(doc.pdfPath, 'done', { path: doc.pdfPath, ms: res.ms, totalMs: performance.now() - t0 });
+				this.onStatus(doc.pdfPath, 'done', { ms: res.ms });
 				return;
 			}
 			const bytes = new Uint8Array(res.bytes);
@@ -173,7 +163,7 @@ export class Baker {
 			console.debug(
 				`[pdf-textboxes] baked ${doc.pdfPath}: ${boxes.length} boxes, worker ${res.ms.toFixed(0)} ms, total ${totalMs.toFixed(0)} ms`,
 			);
-			this.onStatus(doc.pdfPath, 'done', { path: doc.pdfPath, ms: res.ms, totalMs });
+			this.onStatus(doc.pdfPath, 'done', { ms: res.ms });
 			if (doc.revision !== rev) this.schedule(doc.pdfPath);
 		} catch (e) {
 			console.error('[pdf-textboxes] bake failed for', doc.pdfPath, e);

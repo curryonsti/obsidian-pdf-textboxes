@@ -22,7 +22,10 @@
 	/* pdf-lib draws without kerning/ligatures; match it so widths agree. */
 	font-kerning: none;
 	font-variant-ligatures: none;
-	white-space: pre;
+	/* Newlines and spaces as typed; lines wrap at the box width / page edge
+	   (the overlay records where, so the PDF wraps identically). */
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
 	padding: 0;
 	margin: 0;
 	cursor: move;
@@ -52,9 +55,11 @@
 .ptb-box:hover {
 	outline-color: var(--interactive-accent);
 }
-.ptb-box.is-selected,
-.ptb-box:focus-visible {
+.ptb-box.is-selected {
 	outline: 1px solid var(--interactive-accent);
+}
+.ptb-box:focus-visible {
+	outline-style: dashed;
 }
 .ptb-box.is-editing {
 	cursor: text;
@@ -62,14 +67,107 @@
 	outline: 1px solid var(--interactive-accent);
 	background: rgba(255, 255, 255, 0.55);
 }
+/* Resize handles: edges are invisible grab areas, corners small squares. */
+.ptb-handle {
+	position: absolute;
+	display: none;
+	z-index: 1;
+}
+.ptb-box.is-selected .ptb-handle {
+	display: block;
+}
+.ptb-handle-n,
+.ptb-handle-s {
+	left: 6px;
+	right: 6px;
+	height: 8px;
+	cursor: ns-resize;
+}
+.ptb-handle-n {
+	top: -7px;
+}
+.ptb-handle-s {
+	bottom: -7px;
+}
+.ptb-handle-e,
+.ptb-handle-w {
+	top: 4px;
+	bottom: 4px;
+	width: 8px;
+	cursor: ew-resize;
+}
+.ptb-handle-e {
+	right: -7px;
+}
+.ptb-handle-w {
+	left: -7px;
+}
+.ptb-handle-ne,
+.ptb-handle-nw,
+.ptb-handle-se,
+.ptb-handle-sw {
+	width: 9px;
+	height: 9px;
+}
+/* Corner grab area is 9px; the visible dot only 4px and faint. */
+.ptb-handle-ne::after,
+.ptb-handle-nw::after,
+.ptb-handle-se::after,
+.ptb-handle-sw::after {
+	content: '';
+	position: absolute;
+	inset: 2.5px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	opacity: 0.45;
+}
+.ptb-handle-nw {
+	top: -7px;
+	left: -7px;
+	cursor: nwse-resize;
+}
+.ptb-handle-se {
+	bottom: -7px;
+	right: -7px;
+	cursor: nwse-resize;
+}
+.ptb-handle-ne {
+	top: -7px;
+	right: -7px;
+	cursor: nesw-resize;
+}
+.ptb-handle-sw {
+	bottom: -7px;
+	left: -7px;
+	cursor: nesw-resize;
+}
+.ptb-box.is-resizing {
+	opacity: 0.9;
+}
 .ptb-box.is-dragging {
 	opacity: 0.8;
 }
 .ptb-text {
 	outline: none;
-	white-space: pre;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
 	min-width: 0.5em;
 	caret-color: currentColor;
+}
+/* Superscript/subscript: smaller and raised/lowered without changing the line
+   height. Must match SCRIPT_SCALE, SUP_RISE_EM, SUB_DROP_EM in types.ts. */
+.ptb-text sup,
+.ptb-text sub {
+	font-size: 0.65em;
+	line-height: 0;
+	vertical-align: baseline;
+	position: relative;
+}
+.ptb-text sup {
+	top: calc(-0.33em / 0.65);
+}
+.ptb-text sub {
+	top: calc(0.14em / 0.65);
 }
 .ptb-text:empty::before {
 	content: 'Text…';
@@ -102,7 +200,7 @@
 	color: var(--text-muted);
 }
 .ptb-tool.is-open .ptb-panel {
-	max-width: 360px;
+	max-width: 480px;
 	opacity: 1;
 	transform: none;
 	pointer-events: auto;
@@ -224,9 +322,6 @@
 	color: var(--text-normal);
 	cursor: pointer;
 	user-select: none;
-}
-.ptb-sym-base {
-	color: var(--text-faint);
 }
 .ptb-sym:hover {
 	background: var(--background-modifier-hover);

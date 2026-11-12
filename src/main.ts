@@ -137,6 +137,21 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 				return true;
 			},
 		});
+		for (const [kind, id, name] of [
+			['^', 'superscript', 'Superscript'],
+			['_', 'subscript', 'Subscript'],
+		] as const) {
+			this.addCommand({
+				id,
+				name,
+				checkCallback: (checking) => {
+					const o = this.activeOverlay();
+					if (!o) return false;
+					if (!checking) o.toggleScript(kind);
+					return true;
+				},
+			});
+		}
 		this.addCommand({
 			id: 'bake-now',
 			name: 'Write text boxes into this PDF now',
@@ -275,10 +290,6 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		for (const o of this.overlays.values()) {
 			if (o.file === file && o.handle.view !== this.activeOverlay()?.handle.view) o.refresh();
 		}
-	}
-
-	setEditing(_file: TFile, _editing: boolean) {
-		/* Bakes run in a worker and never reload the view, so typing is never interrupted. */
 	}
 
 	zoomChanged(file: TFile, scaleValue: string | null) {
@@ -451,7 +462,7 @@ export default class PdfTextBoxesPlugin extends Plugin implements OverlayHost {
 		if (!ok) return;
 		const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 		const backup = `${this.store.trash}/${stamp}/${file.path}.original.pdf`;
-		await this.store.mkdirp(backup.slice(0, backup.lastIndexOf('/')));
+		await this.app.vault.adapter.mkdir(backup.slice(0, backup.lastIndexOf('/')));
 		await this.app.vault.adapter.copy(this.store.originalPath(file.path), backup);
 		await this.store.adoptCurrentAsOriginal(file.path);
 		this.reloadViews(file);
